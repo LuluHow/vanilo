@@ -1,5 +1,6 @@
 mod builder;
 mod component;
+mod functions;
 mod parser;
 mod server;
 

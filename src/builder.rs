@@ -7,6 +7,7 @@ use crate::parser;
 const PAGES_DIR: &str = "pages";
 const COMPONENTS_DIR: &str = "components";
 const STATIC_DIR: &str = "static";
+const FUNCTIONS_DIR: &str = "functions";
 const DIST_DIR: &str = "dist";
 const LAYOUT_FILE: &str = "layout.html";
 
@@ -15,6 +16,7 @@ pub fn init() -> Result<(), String> {
     create_dir(PAGES_DIR)?;
     create_dir(COMPONENTS_DIR)?;
     create_dir(STATIC_DIR)?;
+    create_dir(FUNCTIONS_DIR)?;
 
     // Default layout
     if !Path::new(LAYOUT_FILE).exists() {
@@ -59,6 +61,19 @@ pub fn init() -> Result<(), String> {
         write_file(&index_path, index)?;
     }
 
+    // Example function
+    let fn_path = format!("{FUNCTIONS_DIR}/hello.js");
+    if !Path::new(&fn_path).exists() {
+        let hello = r#"function handler(req) {
+    return {
+        status: 200,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "hello from simple" })
+    }
+}"#;
+        write_file(&fn_path, hello)?;
+    }
+
     // Empty CSS/JS
     if !Path::new(&format!("{STATIC_DIR}/style.css")).exists() {
         write_file(&format!("{STATIC_DIR}/style.css"), "/* your styles */\n")?;
@@ -71,6 +86,7 @@ pub fn init() -> Result<(), String> {
     println!("  {LAYOUT_FILE}");
     println!("  {PAGES_DIR}/index.html");
     println!("  {COMPONENTS_DIR}/Header.html");
+    println!("  {FUNCTIONS_DIR}/hello.js");
     println!("  {STATIC_DIR}/style.css");
     println!("  {STATIC_DIR}/main.js");
     println!();

@@ -3,6 +3,8 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
 
+use crate::functions;
+
 const DIST_DIR: &str = "dist";
 
 pub fn serve(port: u16) -> Result<(), String> {
@@ -26,23 +28,90 @@ pub fn serve(port: u16) -> Result<(), String> {
         };
 
         let request = String::from_utf8_lossy(&buf[..n]);
-        let path = match request.lines().next() {
-            Some(line) => line.split_whitespace().nth(1).unwrap_or("/"),
+        let first_line = match request.lines().next() {
+            Some(line) => line,
             None => continue,
         };
+        let mut parts = first_line.split_whitespace();
+        let method = parts.next().unwrap_or("GET");
+        let path = parts.next().unwrap_or("/");
 
-        let (status, body, content_type) = resolve_file(path);
+        // Extract request body (after the empty line)
+        let req_body = request
+            .find("\r\n\r\n")
+            .map(|i| &request[i + 4..])
+            .unwrap_or("");
 
-        let response = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
-        );
-
-        let _ = stream.write_all(response.as_bytes());
-        let _ = stream.write_all(&body);
+        if path.starts_with("/api/") {
+            let (status, body, content_type) = handle_function(method, path, req_body);
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(body.as_bytes());
+        } else {
+            let (status, body, content_type) = resolve_file(path);
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(&body);
+        }
     }
 
     Ok(())
+}
+
+/// Handles an /api/* request by executing the matching JS function.
+fn handle_function(method: &str, path: &str, body: &str) -> (&'static str, String, String) {
+    let Some(file_path) = functions::resolve_function(path) else {
+        return ("404 Not Found", "function not found".into(), "text/plain".into());
+    };
+
+    // Split path and query string
+    let (clean_path, query) = path.split_once('?').unwrap_or((path, ""));
+
+    let req = functions::FnRequest {
+        method: method.to_string(),
+        path: clean_path.to_string(),
+        body: body.to_string(),
+        query: query.to_string(),
+    };
+
+    match functions::execute(&file_path, &req) {
+        Ok(resp) => {
+            let status = match resp.status {
+                200 => "200 OK",
+                201 => "201 Created",
+                204 => "204 No Content",
+                301 => "301 Moved Permanently",
+                302 => "302 Found",
+                400 => "400 Bad Request",
+                401 => "401 Unauthorized",
+                403 => "403 Forbidden",
+                404 => "404 Not Found",
+                405 => "405 Method Not Allowed",
+                500 => "500 Internal Server Error",
+                _ => "200 OK",
+            };
+            let ct = resp
+                .headers
+                .get("content-type")
+                .cloned()
+                .unwrap_or_else(|| "application/json".into());
+            (status, resp.body, ct)
+        }
+        Err(e) => {
+            eprintln!("function error: {e}");
+            (
+                "500 Internal Server Error",
+                format!("{{\"error\":\"{e}\"}}"),
+                "application/json".into(),
+            )
+        }
+    }
 }
 
 /// Resolves a URL path to a file in dist/, handling clean URLs.
