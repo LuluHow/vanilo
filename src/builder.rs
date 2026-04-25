@@ -49,7 +49,7 @@ pub fn init() -> Result<(), String> {
 
 <Header title="My Site">
     <a href="/">Home</a>
-    <a href="/about.html">About</a>
+    <a href="/about">About</a>
 </Header>
 
 <main>
@@ -157,11 +157,18 @@ fn process_dir(
             resolved
         };
 
-        // Compute output path preserving directory structure
+        // Compute output path with clean URLs:
+        // about.html -> about/index.html (served as /about/)
+        // index.html stays index.html
         let rel = path
             .strip_prefix(pages_root)
             .map_err(|e| format!("strip prefix: {e}"))?;
-        let out_path = dist_root.join(rel);
+        let out_path = if rel.file_stem().and_then(|s| s.to_str()) == Some("index") {
+            dist_root.join(rel)
+        } else {
+            let without_ext = rel.with_extension("");
+            dist_root.join(without_ext).join("index.html")
+        };
 
         if let Some(parent) = out_path.parent() {
             fs::create_dir_all(parent)
