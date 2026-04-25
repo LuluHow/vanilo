@@ -228,6 +228,9 @@ rate_window = 60        # rate limit window, seconds
 timeout = 5             # JS execution timeout, seconds
 memory = 32             # JS runtime memory limit, MB
 fetch_timeout = 10      # outbound HTTP timeout, seconds
+
+[security_headers]
+# Voir section Sécurité > Headers de sécurité pour les clés disponibles
 ```
 
 Les variables d'environnement `PORT` et `HOST` prennent le dessus sur le fichier. L'argument CLI `simple serve [port]` a la priorité la plus haute sur le port.
@@ -374,13 +377,42 @@ services:
 Le serveur intègre des protections par défaut :
 
 - **Path traversal** : décodage percent-encoding, blocage de `..` et des symlinks hors `dist/`
-- **Extensions bloquées** : `.db`, `.sqlite`, `.env`, `.key`, `.pem`, `.sh`, `.sql`, `.log` — jamais servies ni copiées dans `dist/`
+- **Extensions bloquées** : `.db`, `.sqlite`, `.env`, `.env.*`, `.envrc`, `.key`, `.pem`, `.sh`, `.sql`, `.log`, `.htaccess`, `.bak`, `.swp`, `.DS_Store`, `.gitignore` — jamais servies ni copiées dans `dist/`
 - **Rate limiting** : 60 requêtes / 60s par IP sur `/api/*`
+- **Content-Type** : POST/PUT/PATCH vers `/api/*` avec body requièrent `application/json` (415 sinon)
 - **SSRF** : les `fetch()` en edge function bloquent les IPs privées, localhost, et les encodages numériques
 - **Request smuggling** : `Transfer-Encoding` rejeté, `Content-Length` requis
-- **Headers** : `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`
 - **SQLite** : authorizer whitelist (pas de VACUUM, ATTACH, triggers, views, load_extension)
-- **JS sandbox** : mémoire 32 MB, stack 1 MB, timeout 5s
+- **JS sandbox** : mémoire 32 MB, stack 1 MB, timeout 5s, erreurs non catchées → 400 (détails loggés côté serveur, jamais exposés au client)
+
+### Headers de sécurité
+
+Envoyés sur toutes les réponses (statiques et API) :
+
+| Header | Défaut |
+|--------|--------|
+| `Content-Security-Policy` | `default-src 'self'; style-src 'self' 'unsafe-inline'` |
+| `Strict-Transport-Security` | `max-age=63072000; includeSubDomains` |
+| `X-Frame-Options` | `DENY` |
+| `X-Content-Type-Options` | `nosniff` (toujours actif, non configurable) |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` |
+| `Permissions-Policy` | `camera=(), microphone=(), geolocation=()` |
+| `Cross-Origin-Opener-Policy` | `same-origin` |
+| `Cross-Origin-Resource-Policy` | `same-origin` |
+
+Chaque header est configurable dans `simple.toml`. Une valeur vide désactive le header.
+
+```toml
+[security_headers]
+# Autoriser Stripe
+content_security_policy = "default-src 'self'; script-src 'self' https://js.stripe.com; frame-src https://js.stripe.com"
+
+# Désactiver HSTS en dev
+strict_transport_security = ""
+
+# Autoriser l'intégration en iframe par un domaine spécifique
+x_frame_options = "SAMEORIGIN"
+```
 
 ## Fichiers statiques
 

@@ -108,6 +108,16 @@ rate_window = 60        # rate limit window, seconds
 timeout = 5             # JS execution timeout, seconds
 memory = 32             # JS runtime memory limit, MB
 fetch_timeout = 10      # outbound HTTP timeout, seconds
+
+# [security_headers]
+# Uncomment and edit to override defaults. Empty string disables a header.
+# content_security_policy = "default-src 'self'; style-src 'self' 'unsafe-inline'"
+# strict_transport_security = "max-age=63072000; includeSubDomains"
+# x_frame_options = "DENY"
+# referrer_policy = "strict-origin-when-cross-origin"
+# permissions_policy = "camera=(), microphone=(), geolocation=()"
+# cross_origin_opener_policy = "same-origin"
+# cross_origin_resource_policy = "same-origin"
 "#;
         write_file("simple.toml", config)?;
     }
@@ -341,11 +351,24 @@ const BLOCKED_EXTENSIONS: &[&str] = &[
     ".sh", ".bash",
     ".sql",
     ".log",
+    ".envrc", ".htaccess",
+    ".bak", ".swp", ".swo",
+];
+
+const BLOCKED_FILENAMES: &[&str] = &[
+    ".ds_store", ".gitignore", ".gitmodules",
 ];
 
 fn is_blocked_file(name: &str) -> bool {
     let lower = name.to_lowercase();
-    BLOCKED_EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
+    if BLOCKED_EXTENSIONS.iter().any(|ext| lower.ends_with(ext)) {
+        return true;
+    }
+    // Block .env.* variants (e.g., .env.local, .env.production)
+    if lower.starts_with(".env.") {
+        return true;
+    }
+    BLOCKED_FILENAMES.iter().any(|n| lower == *n)
 }
 
 /// Recursively copies a directory's contents into a destination.

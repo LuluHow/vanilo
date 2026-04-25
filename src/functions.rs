@@ -136,7 +136,11 @@ var __fn = typeof handler === 'function' ? handler : null;
 var __result;
 
 if (__fn) {{
-    __result = __fn(__req);
+    try {{
+        __result = __fn(__req);
+    }} catch(e) {{
+        __result = {{ status: 400, body: JSON.stringify({{ error: "bad request" }}), __error: String(e) }};
+    }}
 }} else {{
     __result = {{ status: 500, body: "no handler function found" }};
 }}
@@ -686,6 +690,10 @@ fn parse_response(json: &str) -> Result<FnResponse, String> {
     let status = extract_json_number(json, "status").unwrap_or(200);
     let body = extract_json_string(json, "body").unwrap_or_default();
     let headers = extract_json_object(json, "headers");
+    // Log caught handler errors server-side (not exposed to client)
+    if let Some(err) = extract_json_string(json, "__error") {
+        eprintln!("handler error: {err}");
+    }
     Ok(FnResponse { status, headers, body })
 }
 

@@ -15,6 +15,14 @@ pub struct Config {
     pub timeout: u64,           // seconds
     pub memory: usize,          // bytes
     pub fetch_timeout: u64,     // seconds
+    // security headers (empty string = don't send)
+    pub content_security_policy: String,
+    pub strict_transport_security: String,
+    pub x_frame_options: String,
+    pub referrer_policy: String,
+    pub permissions_policy: String,
+    pub cross_origin_opener_policy: String,
+    pub cross_origin_resource_policy: String,
 }
 
 impl Default for Config {
@@ -29,7 +37,47 @@ impl Default for Config {
             timeout: 5,
             memory: 32 * 1024 * 1024,    // 32 MB
             fetch_timeout: 10,
+            content_security_policy: "default-src 'self'; style-src 'self' 'unsafe-inline'".into(),
+            strict_transport_security: "max-age=63072000; includeSubDomains".into(),
+            x_frame_options: "DENY".into(),
+            referrer_policy: "strict-origin-when-cross-origin".into(),
+            permissions_policy: "camera=(), microphone=(), geolocation=()".into(),
+            cross_origin_opener_policy: "same-origin".into(),
+            cross_origin_resource_policy: "same-origin".into(),
         }
+    }
+}
+
+impl Config {
+    /// Builds the security headers block for HTTP responses.
+    /// Each non-empty header gets a line. X-Content-Type-Options: nosniff is always sent.
+    pub fn security_headers(&self) -> String {
+        let mut h = String::with_capacity(512);
+        let headers: &[(&str, &str)] = &[
+            ("Content-Security-Policy", &self.content_security_policy),
+            ("Strict-Transport-Security", &self.strict_transport_security),
+            ("X-Frame-Options", &self.x_frame_options),
+            ("Referrer-Policy", &self.referrer_policy),
+            ("Permissions-Policy", &self.permissions_policy),
+            ("Cross-Origin-Opener-Policy", &self.cross_origin_opener_policy),
+            ("Cross-Origin-Resource-Policy", &self.cross_origin_resource_policy),
+        ];
+        for (name, value) in headers {
+            if !value.is_empty() {
+                h.push_str(name);
+                h.push_str(": ");
+                // Strip CR/LF/null to prevent header injection
+                for c in value.chars() {
+                    if c != '\r' && c != '\n' && c != '\0' {
+                        h.push(c);
+                    }
+                }
+                h.push_str("\r\n");
+            }
+        }
+        // Always on, not configurable
+        h.push_str("X-Content-Type-Options: nosniff\r\n");
+        h
     }
 }
 
@@ -67,6 +115,15 @@ pub fn load() -> Config {
         if let Some(n) = v.get("fetch_timeout").and_then(|s| s.parse().ok()) {
             config.fetch_timeout = n;
         }
+
+        // Security headers — override individual headers, empty string disables
+        if let Some(s) = v.get("content_security_policy") { config.content_security_policy = s.clone(); }
+        if let Some(s) = v.get("strict_transport_security") { config.strict_transport_security = s.clone(); }
+        if let Some(s) = v.get("x_frame_options") { config.x_frame_options = s.clone(); }
+        if let Some(s) = v.get("referrer_policy") { config.referrer_policy = s.clone(); }
+        if let Some(s) = v.get("permissions_policy") { config.permissions_policy = s.clone(); }
+        if let Some(s) = v.get("cross_origin_opener_policy") { config.cross_origin_opener_policy = s.clone(); }
+        if let Some(s) = v.get("cross_origin_resource_policy") { config.cross_origin_resource_policy = s.clone(); }
     }
 
     // Env vars override config file
@@ -130,5 +187,36 @@ mod tests {
         let input = "[server]\n# port config\nport = 3000\n";
         let values = parse_toml(input);
         assert_eq!(values.get("port").unwrap(), "3000");
+    }
+
+    #[test]
+    fn security_headers_default() {
+        let config = Config::default();
+        let h = config.security_headers();
+        assert!(h.contains("Content-Security-Policy: default-src 'self'"));
+        assert!(h.contains("Strict-Transport-Security: max-age=63072000"));
+        assert!(h.contains("X-Content-Type-Options: nosniff"));
+        assert!(h.contains("Cross-Origin-Opener-Policy: same-origin"));
+    }
+
+    #[test]
+    fn security_headers_override_and_disable() {
+        let mut config = Config::default();
+        config.content_security_policy = "default-src 'self' https://js.stripe.com".into();
+        config.strict_transport_security = String::new(); // disable HSTS
+        let h = config.security_headers();
+        assert!(h.contains("https://js.stripe.com"));
+        assert!(!h.contains("Strict-Transport-Security"));
+        // nosniff is always present
+        assert!(h.contains("X-Content-Type-Options: nosniff"));
+    }
+
+    #[test]
+    fn security_headers_strips_injection() {
+        let mut config = Config::default();
+        config.x_frame_options = "DENY\r\nInjected: bad".into();
+        let h = config.security_headers();
+        assert!(h.contains("X-Frame-Options: DENYInjected: bad"));
+        assert!(!h.contains("\r\nInjected"));
     }
 }

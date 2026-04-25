@@ -14,6 +14,7 @@ use crate::functions;
 const DIST_DIR: &str = "dist";
 const MAX_HEADERS: usize = 65536; // 64KB
 
+
 /// File extensions that must never be served.
 const BLOCKED_EXTENSIONS: &[&str] = &[
     ".db", ".sqlite", ".sqlite3",
@@ -22,11 +23,25 @@ const BLOCKED_EXTENSIONS: &[&str] = &[
     ".sh", ".bash",
     ".sql",
     ".log",
+    ".envrc", ".htaccess",
+    ".bak", ".swp", ".swo",
+];
+
+const BLOCKED_FILENAMES: &[&str] = &[
+    ".ds_store", ".gitignore", ".gitmodules",
 ];
 
 fn is_blocked_extension(path: &str) -> bool {
     let lower = path.to_lowercase();
-    BLOCKED_EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
+    if BLOCKED_EXTENSIONS.iter().any(|ext| lower.ends_with(ext)) {
+        return true;
+    }
+    let filename = lower.rsplit('/').next().unwrap_or(&lower);
+    // Block .env.* variants (e.g., .env.local, .env.production)
+    if filename.starts_with(".env.") {
+        return true;
+    }
+    BLOCKED_FILENAMES.iter().any(|name| filename == *name)
 }
 
 /// Ensures the active connection counter is decremented even on panic.
@@ -58,7 +73,7 @@ pub fn serve(config: Config) -> Result<(), String> {
         };
 
         if active.load(Ordering::Relaxed) >= config.max_connections {
-            let resp = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 15\r\nConnection: close\r\n\r\nserver too busy";
+            let resp = "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nContent-Length: 15\r\nConnection: close\r\n\r\nserver too busy";
             let _ = stream.write_all(resp.as_bytes());
             continue;
         }
@@ -120,7 +135,7 @@ fn handle_connection(
         .lines()
         .any(|line| line.get(..18).is_some_and(|s| s.eq_ignore_ascii_case("transfer-encoding:")));
     if has_transfer_encoding {
-        let resp = "HTTP/1.1 501 Not Implemented\r\nContent-Length: 32\r\nConnection: close\r\n\r\ntransfer-encoding not supported";
+        let resp = "HTTP/1.1 501 Not Implemented\r\nContent-Type: text/plain\r\nContent-Length: 32\r\nConnection: close\r\n\r\ntransfer-encoding not supported";
         let _ = stream.write_all(resp.as_bytes());
         return;
     }
@@ -136,6 +151,17 @@ fn handle_connection(
             }
         })
         .unwrap_or(0);
+
+    let content_type_header: String = headers_str
+        .lines()
+        .find_map(|line| {
+            if line.get(..13).is_some_and(|s| s.eq_ignore_ascii_case("content-type:")) {
+                Some(line[13..].trim().to_lowercase())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
 
     let body_start = header_end + 4;
     let body_limit = content_length.min(config.max_body + 1);
@@ -153,10 +179,12 @@ fn handle_connection(
     // Path traversal protection: decode percent-encoding before checking
     let decoded_path = url_decode(raw_path.split('?').next().unwrap_or(raw_path));
     if decoded_path.contains("..") || decoded_path.contains('\0') {
-        let resp = "HTTP/1.1 403 Forbidden\r\nContent-Length: 9\r\nConnection: close\r\n\r\nforbidden";
+        let resp = "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: 9\r\nConnection: close\r\n\r\nforbidden";
         let _ = stream.write_all(resp.as_bytes());
         return;
     }
+
+    let sec = config.security_headers();
 
     if raw_path.starts_with("/api/") {
         // Rate limiting by IP
@@ -195,24 +223,45 @@ fn handle_connection(
             return;
         }
 
-        let (status, body, content_type) = handle_function(method, raw_path, &req_body, config);
+        // Require application/json for body-bearing methods (prevents CORS preflight bypass)
+        if matches!(method, "POST" | "PUT" | "PATCH")
+            && content_length > 0
+            && !content_type_header.starts_with("application/json")
+        {
+            let err_body = r#"{"error":"Content-Type must be application/json"}"#;
+            let resp = format!(
+                "HTTP/1.1 415 Unsupported Media Type\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{err_body}",
+                err_body.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            return;
+        }
+
+        // HEAD → execute as GET, suppress body in response
+        let effective_method = if method == "HEAD" { "GET" } else { method };
+        let (status, body, content_type) = handle_function(effective_method, raw_path, &req_body, config);
         let content_type = sanitize_header_value(&content_type);
         let response = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {len}\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {len}\r\n{sec}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
             len = body.len()
         );
         let _ = stream.write_all(response.as_bytes());
-        let _ = stream.write_all(body.as_bytes());
+        if method != "HEAD" {
+            let _ = stream.write_all(body.as_bytes());
+        }
     } else {
         // Strip query string for static file serving
         let file_path = decoded_path.split('?').next().unwrap_or(&decoded_path);
         let (status, body, content_type) = resolve_file(file_path);
+        let cache = cache_control(content_type);
         let response = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{sec}\r\nCache-Control: {cache}\r\nConnection: close\r\n\r\n",
             body.len()
         );
         let _ = stream.write_all(response.as_bytes());
-        let _ = stream.write_all(&body);
+        if method != "HEAD" {
+            let _ = stream.write_all(&body);
+        }
     }
 }
 
@@ -245,6 +294,10 @@ fn handle_function(method: &str, path: &str, body: &str, config: &Config) -> (&'
                 403 => "403 Forbidden",
                 404 => "404 Not Found",
                 405 => "405 Method Not Allowed",
+                409 => "409 Conflict",
+                415 => "415 Unsupported Media Type",
+                422 => "422 Unprocessable Entity",
+                429 => "429 Too Many Requests",
                 500 => "500 Internal Server Error",
                 _ => "200 OK",
             };
@@ -352,6 +405,14 @@ fn content_type(path: &str) -> &'static str {
         "video/webm"
     } else {
         "application/octet-stream"
+    }
+}
+
+fn cache_control(content_type: &str) -> &'static str {
+    if content_type.starts_with("text/html") {
+        "no-cache"
+    } else {
+        "public, max-age=86400"
     }
 }
 
