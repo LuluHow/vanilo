@@ -1,5 +1,6 @@
 mod builder;
 mod component;
+mod config;
 mod functions;
 mod parser;
 mod server;
@@ -28,11 +29,11 @@ fn main() {
                 eprintln!("error: {e}");
                 process::exit(1);
             }
-            let port = args
-                .get(2)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(3000);
-            if let Err(e) = server::serve(port) {
+            let mut cfg = config::load();
+            if let Some(port) = args.get(2).and_then(|s| s.parse().ok()) {
+                cfg.port = port;
+            }
+            if let Err(e) = server::serve(cfg) {
                 eprintln!("error: {e}");
                 process::exit(1);
             }

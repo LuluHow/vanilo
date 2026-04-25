@@ -61,14 +61,24 @@ pub fn init() -> Result<(), String> {
         write_file(&index_path, index)?;
     }
 
-    // Example function
+    // Example function with db
     let fn_path = format!("{FUNCTIONS_DIR}/hello.js");
     if !Path::new(&fn_path).exists() {
         let hello = r#"function handler(req) {
+    db.exec("CREATE TABLE IF NOT EXISTS visits (count INTEGER)");
+
+    var row = db.query("SELECT count FROM visits");
+    if (row.length === 0) {
+        db.exec("INSERT INTO visits VALUES (1)");
+    } else {
+        db.exec("UPDATE visits SET count = count + 1");
+    }
+
+    var result = db.query("SELECT count FROM visits");
     return {
         status: 200,
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ message: "hello from simple" })
+        body: JSON.stringify({ visits: result[0].count })
     }
 }"#;
         write_file(&fn_path, hello)?;
@@ -82,6 +92,59 @@ pub fn init() -> Result<(), String> {
         write_file(&format!("{STATIC_DIR}/main.js"), "// your scripts\n")?;
     }
 
+    // Config
+    if !Path::new("simple.toml").exists() {
+        let config = r#"# simple.toml — project configuration
+# Override port/host with env vars: PORT, HOST
+
+port = 3000
+host = "127.0.0.1"
+
+max_body = 1            # request body limit, MB
+max_connections = 128
+rate_limit = 60         # requests per window on /api/*
+rate_window = 60        # rate limit window, seconds
+
+timeout = 5             # JS execution timeout, seconds
+memory = 32             # JS runtime memory limit, MB
+fetch_timeout = 10      # outbound HTTP timeout, seconds
+"#;
+        write_file("simple.toml", config)?;
+    }
+
+    // Dockerfile
+    if !Path::new("Dockerfile").exists() {
+        let dockerfile = r#"FROM simple
+WORKDIR /app
+COPY . .
+RUN simple build
+EXPOSE 3000
+ENV HOST=0.0.0.0
+CMD ["simple", "serve"]
+"#;
+        write_file("Dockerfile", dockerfile)?;
+    }
+
+    // .dockerignore
+    if !Path::new(".dockerignore").exists() {
+        let ignore = "dist/\ndata.db\n.git/\n*.db\n*.sqlite*\n*.env\n*.log\ntarget/\n";
+        write_file(".dockerignore", ignore)?;
+    }
+
+    // compose.yaml
+    if !Path::new("compose.yaml").exists() {
+        let compose = r#"services:
+  app:
+    build: .
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./data.db:/app/data.db
+    restart: unless-stopped
+"#;
+        write_file("compose.yaml", compose)?;
+    }
+
     println!("project initialized:");
     println!("  {LAYOUT_FILE}");
     println!("  {PAGES_DIR}/index.html");
@@ -89,8 +152,11 @@ pub fn init() -> Result<(), String> {
     println!("  {FUNCTIONS_DIR}/hello.js");
     println!("  {STATIC_DIR}/style.css");
     println!("  {STATIC_DIR}/main.js");
+    println!("  simple.toml");
+    println!("  Dockerfile");
+    println!("  compose.yaml");
     println!();
-    println!("run `simple build` to generate dist/");
+    println!("run `simple serve` to start dev server");
     Ok(())
 }
 
@@ -267,7 +333,23 @@ fn parse_quoted_value(input: &str) -> Option<(String, &str)> {
     Some((value, &rest[end + 1..]))
 }
 
+/// File extensions that must never be copied to dist/ or served.
+const BLOCKED_EXTENSIONS: &[&str] = &[
+    ".db", ".sqlite", ".sqlite3",
+    ".env",
+    ".key", ".pem", ".p12", ".pfx",
+    ".sh", ".bash",
+    ".sql",
+    ".log",
+];
+
+fn is_blocked_file(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    BLOCKED_EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
+}
+
 /// Recursively copies a directory's contents into a destination.
+/// Skips files with sensitive extensions.
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<usize, String> {
     let mut count = 0;
     let entries = fs::read_dir(src).map_err(|e| format!("read {}: {e}", src.display()))?;
@@ -275,6 +357,13 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<usize, String> {
     for entry in entries {
         let entry = entry.map_err(|e| format!("dir entry: {e}"))?;
         let path = entry.path();
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+        if is_blocked_file(file_name) {
+            println!("  skipped {}: blocked extension", path.display());
+            continue;
+        }
+
         let dest = dst.join(path.file_name().unwrap());
 
         if path.is_dir() {
