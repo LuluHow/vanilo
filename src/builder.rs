@@ -35,33 +35,111 @@ pub fn init() -> Result<(), String> {
         write_file(LAYOUT_FILE, layout)?;
     }
 
-    // Example component
+    // Header component
     let header_path = format!("{COMPONENTS_DIR}/Header.html");
     if !Path::new(&header_path).exists() {
         let header = r#"<header>
-    <h1>{{title}}</h1>
+    <a href="/" class="logo">{{title}}</a>
 </header>"#;
         write_file(&header_path, header)?;
     }
 
-    // Example page
+    // Footer component
+    let footer_path = format!("{COMPONENTS_DIR}/Footer.html");
+    if !Path::new(&footer_path).exists() {
+        write_file(&footer_path, r#"<footer>
+    <p>Built with simple</p>
+</footer>"#)?;
+    }
+
+    // Index page
     let index_path = format!("{PAGES_DIR}/index.html");
     if !Path::new(&index_path).exists() {
         let index = r#"<meta name="title" content="Home">
 
-<Header title="My Site">
-    <a href="/">Home</a>
-    <a href="/about">About</a>
+<Header title="simple">
+    <nav>
+        <a href="/">Home</a>
+        <a href="/about">About</a>
+    </nav>
 </Header>
 
 <main>
-    <h2>Welcome</h2>
-    <p>Edit pages/ and components/, then run <code>simple build</code>.</p>
-</main>"#;
+    <section class="hero">
+        <p class="badge">simple init</p>
+        <h1>Your project is&nbsp;ready.</h1>
+        <p class="sub">Static site generator with edge functions. Edit <code>pages/</code> and <code>components/</code>, then reload.</p>
+    </section>
+
+    <hr>
+
+    <section class="grid">
+        <div class="card">
+            <h3>Components</h3>
+            <p>Reusable HTML with props and children.</p>
+            <pre><code>&lt;Header title="simple"&gt;
+  &lt;nav&gt;...&lt;/nav&gt;
+&lt;/Header&gt;</code></pre>
+        </div>
+        <div class="card">
+            <h3>Edge functions</h3>
+            <p>Server-side JS via QuickJS on /api/*.</p>
+            <pre><code>function handler(req) {
+  return { body: "hello" }
+}</code></pre>
+        </div>
+        <div class="card">
+            <h3>SQLite</h3>
+            <p>Built-in database in every function.</p>
+            <pre><code>db.query("SELECT * FROM t")
+db.exec("INSERT INTO t ...")</code></pre>
+        </div>
+        <div class="card">
+            <h3>Deploy</h3>
+            <p>Docker image, one command to ship.</p>
+            <pre><code>docker build -t my-site .
+docker compose up -d</code></pre>
+        </div>
+    </section>
+
+    <hr>
+
+    <section class="counter">
+        <p>This page has been viewed <strong id="visit-count">-</strong> times</p>
+        <p class="note">Powered by <code>/api/hello</code> — an edge function backed by SQLite.</p>
+    </section>
+</main>
+
+<Footer />"#;
         write_file(&index_path, index)?;
     }
 
-    // Example function with db
+    // About page
+    let about_path = format!("{PAGES_DIR}/about.html");
+    if !Path::new(&about_path).exists() {
+        let about = r#"<meta name="title" content="About">
+
+<Header title="simple">
+    <nav>
+        <a href="/">Home</a>
+        <a href="/about">About</a>
+    </nav>
+</Header>
+
+<main>
+    <div class="content">
+        <h1>About</h1>
+        <p>simple is a static site generator with edge functions, written in Rust.</p>
+        <p>Zero config, zero frontend dependencies. Write HTML and components, build your site. Add JavaScript functions for server-side logic backed by SQLite.</p>
+        <p>This page lives at <code>pages/about.html</code> and is served at <code>/about</code> — clean URLs are automatic.</p>
+    </div>
+</main>
+
+<Footer />"#;
+        write_file(&about_path, about)?;
+    }
+
+    // Example edge function with db
     let fn_path = format!("{FUNCTIONS_DIR}/hello.js");
     if !Path::new(&fn_path).exists() {
         let hello = r#"function handler(req) {
@@ -84,12 +162,12 @@ pub fn init() -> Result<(), String> {
         write_file(&fn_path, hello)?;
     }
 
-    // Empty CSS/JS
+    // Starter CSS/JS
     if !Path::new(&format!("{STATIC_DIR}/style.css")).exists() {
-        write_file(&format!("{STATIC_DIR}/style.css"), "/* your styles */\n")?;
+        write_file(&format!("{STATIC_DIR}/style.css"), include_str!("scaffold/style.css"))?;
     }
     if !Path::new(&format!("{STATIC_DIR}/main.js")).exists() {
-        write_file(&format!("{STATIC_DIR}/main.js"), "// your scripts\n")?;
+        write_file(&format!("{STATIC_DIR}/main.js"), include_str!("scaffold/main.js"))?;
     }
 
     // Config
@@ -109,9 +187,9 @@ timeout = 5             # JS execution timeout, seconds
 memory = 32             # JS runtime memory limit, MB
 fetch_timeout = 10      # outbound HTTP timeout, seconds
 
-# [security_headers]
-# Uncomment and edit to override defaults. Empty string disables a header.
-# content_security_policy = "default-src 'self'; style-src 'self' 'unsafe-inline'"
+[security_headers]
+content_security_policy = "default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' https://cdn.jsdelivr.net"
+# Uncomment to override other defaults. Empty string disables a header.
 # strict_transport_security = "max-age=63072000; includeSubDomains"
 # x_frame_options = "DENY"
 # referrer_policy = "strict-origin-when-cross-origin"
@@ -158,7 +236,9 @@ CMD ["simple", "serve"]
     println!("project initialized:");
     println!("  {LAYOUT_FILE}");
     println!("  {PAGES_DIR}/index.html");
+    println!("  {PAGES_DIR}/about.html");
     println!("  {COMPONENTS_DIR}/Header.html");
+    println!("  {COMPONENTS_DIR}/Footer.html");
     println!("  {FUNCTIONS_DIR}/hello.js");
     println!("  {STATIC_DIR}/style.css");
     println!("  {STATIC_DIR}/main.js");

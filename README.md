@@ -1,8 +1,8 @@
 # simple
 
-Générateur de sites statiques avec edge functions, en Rust.
+A static site generator with edge functions, written in Rust.
 
-Zéro config, zéro dépendance frontend. Tu écris du HTML, tu déclares des composants, `simple build` génère ton site. Tu ajoutes des edge functions en JS, `simple serve` lance le tout.
+Zero config, zero frontend dependencies. Write HTML, declare components, `simple build` generates your site. Add JavaScript edge functions, `simple serve` runs everything.
 
 **scaffold &rarr; dev &rarr; deploy.**
 
@@ -12,48 +12,50 @@ Zéro config, zéro dépendance frontend. Tu écris du HTML, tu déclares des co
 cargo install --path .
 ```
 
-## Démarrage rapide
+## Quick start
 
 ```bash
-simple init        # scaffold le projet
-simple serve       # build + serveur de dev sur http://127.0.0.1:3000
+simple init        # scaffold a new project
+simple serve       # build + dev server on http://127.0.0.1:3000
 ```
 
-## Commandes
+## Commands
 
-| Commande | Description |
-|----------|------------|
-| `simple init` | Crée la structure du projet (pages, composants, fonctions, Dockerfile...) |
-| `simple build` | Génère `dist/` |
-| `simple serve [port]` | Build + serveur de dev (défaut: port 3000) |
+| Command | Description |
+|---------|-------------|
+| `simple init` | Scaffold the project structure (pages, components, functions, Dockerfile, compose.yaml, simple.toml) |
+| `simple build` | Generate the `dist/` directory from sources |
+| `simple serve [port]` | Build + start the dev server (default: port 3000) |
 
-## Structure du projet
+## Project structure
 
 ```
-mon-site/
-  simple.toml            # configuration (port, host, limites)
-  layout.html            # layout global (optionnel)
-  pages/                 # tes pages
+my-site/
+  simple.toml            # configuration
+  layout.html            # global layout (optional)
+  pages/                 # your pages
     index.html
     about.html
-  components/            # composants réutilisables
+  components/            # reusable components
     Header.html
     Card.html
-  static/                # copié tel quel dans dist/
+  static/                # copied as-is into dist/
     style.css
     main.js
-  functions/             # edge functions JS
+  functions/             # edge functions (JS)
     hello.js
-  Dockerfile             # image du site
-  compose.yaml           # déploiement VPS
+  dist/                  # build output (generated)
+  data.db                # SQLite database (created on first db call)
+  Dockerfile
+  compose.yaml
   .dockerignore
 ```
 
-## Composants
+## Components
 
-Un composant = un fichier HTML dans `components/`. Nom en PascalCase.
+A component is an HTML file inside `components/`. The filename must be PascalCase.
 
-### Composant simple
+### Basic component
 
 ```html
 <!-- components/Card.html -->
@@ -64,25 +66,25 @@ Un composant = un fichier HTML dans `components/`. Nom en PascalCase.
 ```html
 <!-- pages/index.html -->
 <Card>
-    <h1>Titre</h1>
-    <p>Contenu</p>
+    <h1>Title</h1>
+    <p>Content goes here</p>
 </Card>
 ```
 
-Résultat :
+Output:
 
 ```html
 <div class="card">
-    <h1>Titre</h1>
-    <p>Contenu</p>
+    <h1>Title</h1>
+    <p>Content goes here</p>
 </div>
 ```
 
-Le contenu enfant va automatiquement dans l'élément racine du composant.
+Child content is automatically inserted into the root element of the component.
 
 ### Props
 
-Passe des valeurs via les attributs avec `{{nom}}` :
+Pass values through attributes using `{{name}}` placeholders:
 
 ```html
 <!-- components/Header.html -->
@@ -92,28 +94,36 @@ Passe des valeurs via les attributs avec `{{nom}}` :
 ```
 
 ```html
-<Header title="Mon Site" />
+<Header title="My Site" />
 ```
 
-### Self-closing
-
-Sans contenu enfant, ferme directement :
+Output:
 
 ```html
-<Header title="Accueil" />
+<header>
+    <h1>My Site</h1>
+</header>
 ```
 
-### Imbrication
+### Self-closing tags
 
-Les composants peuvent contenir d'autres composants. La résolution est récursive.
+Components without children can be self-closed:
+
+```html
+<Header title="Home" />
+```
+
+### Nesting
+
+Components can contain other components. Resolution is recursive.
 
 ## Layout
 
-`layout.html` enveloppe toutes les pages. Le contenu de chaque page est inséré avant `</body>`.
+`layout.html` wraps all pages. Each page's content is inserted before `</body>`.
 
 ```html
 <!DOCTYPE html>
-<html lang="fr">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <title>{{title}}</title>
@@ -124,52 +134,54 @@ Les composants peuvent contenir d'autres composants. La résolution est récursi
 </html>
 ```
 
-`{{title}}` dans le layout est remplacé par la valeur du `<meta>` correspondant dans la page :
+`{{title}}` in the layout is replaced by the value of the matching `<meta>` tag in the page:
 
 ```html
-<meta name="title" content="Accueil">
+<meta name="title" content="Home">
 
-<p>Mon contenu</p>
+<p>My content</p>
 ```
+
+Any `<meta name="...">` tag in a page becomes a prop available in the layout.
 
 ## Clean URLs
 
-`about.html` est généré en `about/index.html` et servi sur `/about`.
+`about.html` is built as `about/index.html` and served at `/about`.
 
 ## Edge functions
 
-Les fichiers JS dans `functions/` sont exécutés côté serveur via QuickJS.
+JavaScript files in `functions/` are executed server-side via an embedded QuickJS runtime.
 
-Le routage est automatique :
+Routing is automatic:
 
-| Fichier | URL |
-|---------|-----|
+| File | URL |
+|------|-----|
 | `functions/hello.js` | `/api/hello` |
 | `functions/users/list.js` | `/api/users/list` |
 | `functions/users/index.js` | `/api/users` |
 
 ### Request / Response
 
-Chaque fichier doit exporter une fonction `handler(req)` :
+Each file must export a `handler(req)` function:
 
 ```javascript
 function handler(req) {
-    // req.method  — GET, POST, etc.
+    // req.method  — GET, POST, PUT, PATCH, DELETE, HEAD
     // req.path    — /api/hello
-    // req.body    — corps de la requête
-    // req.query   — query string (ex: "foo=bar")
+    // req.body    — request body (string)
+    // req.query   — query string (e.g. "foo=bar")
 
     return {
-        status: 200,                              // optionnel, défaut 200
-        headers: { "content-type": "text/plain" }, // optionnel
-        body: "Hello!"                             // string ou objet (auto JSON.stringify)
+        status: 200,                              // optional, defaults to 200
+        headers: { "content-type": "text/plain" }, // optional
+        body: "Hello!"                             // string or object (auto JSON.stringify)
     }
 }
 ```
 
-### Base de données (SQLite)
+### Database (SQLite)
 
-Un objet `db` est disponible dans chaque fonction. La base (`data.db`) est créée automatiquement au premier appel.
+A global `db` object is available in every function. The database file (`data.db`) is created automatically on first use. WAL mode is enabled by default.
 
 ```javascript
 function handler(req) {
@@ -189,7 +201,14 @@ function handler(req) {
 }
 ```
 
-**Requêtes paramétrées** (anti-injection SQL) :
+**API:**
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `db.query(sql, params?)` | `Array<Object>` | Run a SELECT query, returns rows as objects |
+| `db.exec(sql, params?)` | `{ changes: number }` | Run an INSERT/UPDATE/DELETE, returns affected row count |
+
+**Parameterized queries** (prevents SQL injection):
 
 ```javascript
 db.query("SELECT * FROM users WHERE id = ?", [userId]);
@@ -198,7 +217,7 @@ db.exec("INSERT INTO users (name) VALUES (?)", [name]);
 
 ### fetch()
 
-Appels HTTP sortants depuis les edge functions :
+Outbound HTTP calls from edge functions:
 
 ```javascript
 function handler(req) {
@@ -212,61 +231,175 @@ function handler(req) {
 }
 ```
 
+`fetch()` returns `{ status, body }`.
+
 ## Configuration
 
-Fichier `simple.toml` à la racine du projet :
+All configuration lives in `simple.toml` at the project root. Every field is optional &mdash; defaults are applied when omitted.
+
+### Override priority
+
+Settings are resolved in this order (highest priority first):
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | CLI arguments | `simple serve 8080` |
+| 2 | Environment variables | `PORT=8080`, `HOST=0.0.0.0` |
+| 3 | `simple.toml` | `port = 8080` |
+| 4 | Built-in defaults | `port = 3000`, `host = "127.0.0.1"` |
+
+### Full reference
 
 ```toml
-port = 3000
-host = "127.0.0.1"
+# ── Network ──────────────────────────────────────────────
+port = 3000                 # server port
+host = "127.0.0.1"          # bind address
 
-max_body = 1            # request body limit, MB
-max_connections = 128
-rate_limit = 60         # requests per window on /api/*
-rate_window = 60        # rate limit window, seconds
+# ── Server limits ────────────────────────────────────────
+max_body = 1                # request body limit (MB)
+max_connections = 128       # maximum concurrent connections
+rate_limit = 60             # requests per window on /api/*
+rate_window = 60            # rate limit window (seconds)
 
-timeout = 5             # JS execution timeout, seconds
-memory = 32             # JS runtime memory limit, MB
-fetch_timeout = 10      # outbound HTTP timeout, seconds
+# ── JavaScript runtime ──────────────────────────────────
+timeout = 5                 # JS execution timeout (seconds)
+memory = 32                 # JS runtime memory limit (MB)
+fetch_timeout = 10          # outbound HTTP timeout (seconds)
 
+# ── Security headers ────────────────────────────────────
+# All headers below can be overridden. Set to "" to disable.
 [security_headers]
-# Voir section Sécurité > Headers de sécurité pour les clés disponibles
+content_security_policy = "default-src 'self'; style-src 'self' 'unsafe-inline'"
+strict_transport_security = "max-age=63072000; includeSubDomains"
+x_frame_options = "DENY"
+referrer_policy = "strict-origin-when-cross-origin"
+permissions_policy = "camera=(), microphone=(), geolocation=()"
+cross_origin_opener_policy = "same-origin"
+cross_origin_resource_policy = "same-origin"
+# x_content_type_options is always "nosniff" and cannot be overridden.
 ```
 
-Les variables d'environnement `PORT` et `HOST` prennent le dessus sur le fichier. L'argument CLI `simple serve [port]` a la priorité la plus haute sur le port.
+### Configuration examples
 
-**Priorité :** CLI > env vars > simple.toml > défauts
+**Allow Stripe in CSP:**
 
-## Déploiement Docker
+```toml
+[security_headers]
+content_security_policy = "default-src 'self'; script-src 'self' https://js.stripe.com; frame-src https://js.stripe.com"
+```
 
-### Setup (une fois)
+**Disable HSTS in development:**
 
-Build l'image de base `simple` depuis ce repo :
+```toml
+[security_headers]
+strict_transport_security = ""
+```
+
+**Allow iframe embedding from same origin:**
+
+```toml
+[security_headers]
+x_frame_options = "SAMEORIGIN"
+```
+
+**Increase limits for a heavier workload:**
+
+```toml
+max_body = 5
+max_connections = 256
+rate_limit = 120
+timeout = 10
+memory = 64
+```
+
+**Bind to all interfaces (for Docker or remote access):**
+
+```toml
+host = "0.0.0.0"
+```
+
+Or via environment variable:
+
+```bash
+HOST=0.0.0.0 simple serve
+```
+
+## Security
+
+The server ships with security defaults enabled out of the box.
+
+### Built-in protections
+
+| Protection | Details |
+|------------|---------|
+| **Path traversal** | Percent-encoding decoded before validation; `..` and null bytes rejected; symlinks outside `dist/` blocked |
+| **Blocked file extensions** | `.db`, `.sqlite`, `.env`, `.env.*`, `.envrc`, `.key`, `.pem`, `.sh`, `.sql`, `.log`, `.htaccess`, `.bak`, `.swp`, `.DS_Store`, `.gitignore` &mdash; never served or copied into `dist/` |
+| **Rate limiting** | Per-IP, per-window on `/api/*` (default: 60 req / 60s, configurable) |
+| **Content-Type enforcement** | POST/PUT/PATCH to `/api/*` with a body require `application/json` (returns 415 otherwise) |
+| **SSRF protection** | `fetch()` in edge functions blocks private IPs, localhost, link-local, and numeric IP encodings |
+| **Request smuggling** | `Transfer-Encoding` header rejected; `Content-Length` required |
+| **SQL injection** | Parameterized queries supported; SQLite authorizer whitelist blocks VACUUM, ATTACH, triggers, views, and `load_extension()` |
+| **JS sandbox** | Memory cap (default 32 MB), stack limit (1 MB), execution timeout (default 5s); uncaught errors return 400 with details logged server-side only |
+
+### Security headers
+
+Sent on **all** responses (static files and API):
+
+| Header | Default | Configurable |
+|--------|---------|:------------:|
+| `Content-Security-Policy` | `default-src 'self'; style-src 'self' 'unsafe-inline'` | Yes |
+| `Strict-Transport-Security` | `max-age=63072000; includeSubDomains` | Yes |
+| `X-Frame-Options` | `DENY` | Yes |
+| `X-Content-Type-Options` | `nosniff` | No |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` | Yes |
+| `Permissions-Policy` | `camera=(), microphone=(), geolocation=()` | Yes |
+| `Cross-Origin-Opener-Policy` | `same-origin` | Yes |
+| `Cross-Origin-Resource-Policy` | `same-origin` | Yes |
+
+Set any header to an empty string `""` in `simple.toml` to disable it.
+
+## Static files
+
+Everything inside `static/` is copied as-is into `dist/`, preserving directory structure. Files with blocked extensions (see Security) are excluded.
+
+Cache headers:
+- HTML files: `Cache-Control: no-cache`
+- Other files: `Cache-Control: public, max-age=86400`
+
+## Docker deployment
+
+### Build the base image (once)
+
+From this repository:
 
 ```bash
 docker build -t simple .
 ```
 
-### Flow complet
+This builds the `simple` binary into a minimal Debian image.
+
+### Full workflow
 
 ```bash
-# Dev
-mkdir mon-site && cd mon-site
+# Local development
+mkdir my-site && cd my-site
 simple init
 simple serve
 
-# Build & push
-docker build -t user/mon-site .
-docker push user/mon-site
+# Build & push the site image
+docker build -t user/my-site .
+docker push user/my-site
 
-# VPS
-scp compose.yaml user@vps:~/mon-site/
-ssh user@vps "cd mon-site && docker compose up -d"
+# On your VPS
+scp compose.yaml user@vps:~/my-site/
+ssh user@vps "cd my-site && docker compose up -d"
 ```
 
-DNS : A record vers l'IP du VPS. C'est en ligne.
+Point a DNS A record to your VPS IP. Done.
 
-### Le Dockerfile du site (généré par init)
+### Generated Dockerfile
+
+`simple init` creates this Dockerfile for your site:
 
 ```dockerfile
 FROM simple
@@ -278,9 +411,9 @@ ENV HOST=0.0.0.0
 CMD ["simple", "serve"]
 ```
 
-Léger : pas de compilation Rust, juste copier les fichiers et builder le HTML.
+No Rust compilation at this stage &mdash; just copy files and build HTML.
 
-### compose.yaml (généré par init)
+### Generated compose.yaml
 
 ```yaml
 services:
@@ -293,13 +426,13 @@ services:
     restart: unless-stopped
 ```
 
-L'app écoute sur `127.0.0.1:3000` — accessible uniquement via le reverse proxy, pas directement depuis l'extérieur. Le volume persiste `data.db` sur le host.
+The app listens on `127.0.0.1:3000` &mdash; only reachable through a reverse proxy, not directly from the internet. The volume persists `data.db` on the host.
 
 ### Reverse proxy
 
-L'app a besoin d'un reverse proxy devant elle pour le HTTPS et le domaine.
+You need a reverse proxy in front for HTTPS and domain routing.
 
-**Nginx** (si déjà installé sur le VPS) :
+**Nginx** (if already on your VPS):
 
 ```nginx
 server {
@@ -319,9 +452,9 @@ server {
 certbot --nginx -d example.com
 ```
 
-**Caddy** (alternative zéro config, HTTPS automatique) :
+**Caddy** (zero-config automatic HTTPS):
 
-Ajoute au `compose.yaml` :
+Add to `compose.yaml`:
 
 ```yaml
 services:
@@ -339,7 +472,7 @@ volumes:
   caddy_data:
 ```
 
-`Caddyfile` :
+`Caddyfile`:
 
 ```
 example.com {
@@ -347,73 +480,27 @@ example.com {
 }
 ```
 
-Avec Caddy, change `127.0.0.1:3000:3000` en `expose: ["3000"]` dans le compose (réseau Docker interne).
+When using Caddy in Docker Compose, change `127.0.0.1:3000:3000` to `expose: ["3000"]` so the app is only reachable through Docker's internal network.
 
 ### Registry
 
-N'importe quel registry Docker fonctionne :
+Any Docker registry works:
 
 ```bash
 # Docker Hub
-docker build -t user/mon-site .
-docker push user/mon-site
+docker build -t user/my-site .
+docker push user/my-site
 
 # GitHub Container Registry
-docker build -t ghcr.io/user/mon-site .
-docker push ghcr.io/user/mon-site
+docker build -t ghcr.io/user/my-site .
+docker push ghcr.io/user/my-site
 ```
 
-Sur le VPS, dans `compose.yaml`, remplace `build: .` par l'image du registry :
+On the VPS, replace `build: .` with the registry image in `compose.yaml`:
 
 ```yaml
 services:
   app:
-    image: user/mon-site
+    image: user/my-site
     # ...
 ```
-
-## Sécurité
-
-Le serveur intègre des protections par défaut :
-
-- **Path traversal** : décodage percent-encoding, blocage de `..` et des symlinks hors `dist/`
-- **Extensions bloquées** : `.db`, `.sqlite`, `.env`, `.env.*`, `.envrc`, `.key`, `.pem`, `.sh`, `.sql`, `.log`, `.htaccess`, `.bak`, `.swp`, `.DS_Store`, `.gitignore` — jamais servies ni copiées dans `dist/`
-- **Rate limiting** : 60 requêtes / 60s par IP sur `/api/*`
-- **Content-Type** : POST/PUT/PATCH vers `/api/*` avec body requièrent `application/json` (415 sinon)
-- **SSRF** : les `fetch()` en edge function bloquent les IPs privées, localhost, et les encodages numériques
-- **Request smuggling** : `Transfer-Encoding` rejeté, `Content-Length` requis
-- **SQLite** : authorizer whitelist (pas de VACUUM, ATTACH, triggers, views, load_extension)
-- **JS sandbox** : mémoire 32 MB, stack 1 MB, timeout 5s, erreurs non catchées → 400 (détails loggés côté serveur, jamais exposés au client)
-
-### Headers de sécurité
-
-Envoyés sur toutes les réponses (statiques et API) :
-
-| Header | Défaut |
-|--------|--------|
-| `Content-Security-Policy` | `default-src 'self'; style-src 'self' 'unsafe-inline'` |
-| `Strict-Transport-Security` | `max-age=63072000; includeSubDomains` |
-| `X-Frame-Options` | `DENY` |
-| `X-Content-Type-Options` | `nosniff` (toujours actif, non configurable) |
-| `Referrer-Policy` | `strict-origin-when-cross-origin` |
-| `Permissions-Policy` | `camera=(), microphone=(), geolocation=()` |
-| `Cross-Origin-Opener-Policy` | `same-origin` |
-| `Cross-Origin-Resource-Policy` | `same-origin` |
-
-Chaque header est configurable dans `simple.toml`. Une valeur vide désactive le header.
-
-```toml
-[security_headers]
-# Autoriser Stripe
-content_security_policy = "default-src 'self'; script-src 'self' https://js.stripe.com; frame-src https://js.stripe.com"
-
-# Désactiver HSTS en dev
-strict_transport_security = ""
-
-# Autoriser l'intégration en iframe par un domaine spécifique
-x_frame_options = "SAMEORIGIN"
-```
-
-## Fichiers statiques
-
-Tout ce qui est dans `static/` est copié tel quel dans `dist/`.

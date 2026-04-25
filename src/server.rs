@@ -242,7 +242,7 @@ fn handle_connection(
         let (status, body, content_type) = handle_function(effective_method, raw_path, &req_body, config);
         let content_type = sanitize_header_value(&content_type);
         let response = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {len}\r\n{sec}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {len}\r\n{sec}Cache-Control: no-store\r\nConnection: close\r\n\r\n",
             len = body.len()
         );
         let _ = stream.write_all(response.as_bytes());
@@ -255,7 +255,7 @@ fn handle_connection(
         let (status, body, content_type) = resolve_file(file_path);
         let cache = cache_control(content_type);
         let response = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{sec}\r\nCache-Control: {cache}\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{sec}Cache-Control: {cache}\r\nConnection: close\r\n\r\n",
             body.len()
         );
         let _ = stream.write_all(response.as_bytes());
