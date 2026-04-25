@@ -104,12 +104,10 @@ Sans contenu enfant, ferme directement :
 </html>
 ```
 
-Les variables comme `{{title}}` viennent du frontmatter de chaque page :
+`{{title}}` dans le layout est remplacé par la valeur du `<meta>` correspondant dans la page :
 
 ```html
----
-title: Accueil
----
+<meta name="title" content="Accueil">
 
 <p>Mon contenu</p>
 ```

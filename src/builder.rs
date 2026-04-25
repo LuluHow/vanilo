@@ -45,9 +45,7 @@ pub fn init() -> Result<(), String> {
     // Example page
     let index_path = format!("{PAGES_DIR}/index.html");
     if !Path::new(&index_path).exists() {
-        let index = r#"---
-title: Home
----
+        let index = r#"<meta name="title" content="Home">
 
 <Header title="My Site">
     <a href="/">Home</a>
@@ -146,15 +144,15 @@ fn process_dir(
         let content =
             fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
 
-        // Extract frontmatter
-        let (frontmatter, body) = parse_frontmatter(&content);
+        // Extract <meta> tags as props, remove them from body
+        let (props, body) = extract_meta(&content);
 
         // Resolve components in page body
         let resolved = parser::resolve(&body, components);
 
         // Wrap in layout if available
         let final_html = if let Some(layout_tpl) = layout {
-            component::render_layout(layout_tpl, &frontmatter, &resolved)
+            component::render_layout(layout_tpl, &props, &resolved)
         } else {
             resolved
         };
@@ -179,33 +177,71 @@ fn process_dir(
     Ok(count)
 }
 
-/// Parses simple YAML-like frontmatter delimited by `---`.
-fn parse_frontmatter(content: &str) -> (std::collections::HashMap<String, String>, String) {
+/// Extracts `<meta name="key" content="value">` tags from the page content.
+/// Returns the props and the body with meta tags removed.
+fn extract_meta(content: &str) -> (std::collections::HashMap<String, String>, String) {
     let mut props = std::collections::HashMap::new();
+    let mut body = String::with_capacity(content.len());
 
-    if !content.starts_with("---") {
-        return (props, content.to_string());
-    }
-
-    // Find closing ---
-    if let Some(end) = content[3..].find("\n---") {
-        let fm_block = &content[3..3 + end];
-        let body = &content[3 + end + 4..]; // skip past closing ---\n
-
-        for line in fm_block.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            if let Some((key, value)) = line.split_once(':') {
-                props.insert(key.trim().to_string(), value.trim().to_string());
-            }
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(meta) = parse_meta_tag(trimmed) {
+            props.insert(meta.0, meta.1);
+        } else {
+            body.push_str(line);
+            body.push('\n');
         }
-
-        return (props, body.to_string());
     }
 
-    (props, content.to_string())
+    // Remove trailing newline added by the loop
+    if body.ends_with('\n') && !content.ends_with('\n') {
+        body.pop();
+    }
+
+    (props, body)
+}
+
+/// Parses a single `<meta name="..." content="...">` tag.
+fn parse_meta_tag(line: &str) -> Option<(String, String)> {
+    let line = line.strip_prefix("<meta ")?;
+    let line = line.strip_suffix('>')?.strip_suffix('/').unwrap_or(line);
+    let line = line.trim();
+
+    let mut name = None;
+    let mut content = None;
+
+    // Simple attribute parsing for name="..." and content="..."
+    let mut remaining = line;
+    while !remaining.is_empty() {
+        remaining = remaining.trim_start();
+        if let Some(rest) = remaining.strip_prefix("name=") {
+            let (val, r) = parse_quoted_value(rest)?;
+            name = Some(val);
+            remaining = r;
+        } else if let Some(rest) = remaining.strip_prefix("content=") {
+            let (val, r) = parse_quoted_value(rest)?;
+            content = Some(val);
+            remaining = r;
+        } else {
+            // Skip unknown attribute
+            let end = remaining.find(|c: char| c.is_ascii_whitespace()).unwrap_or(remaining.len());
+            remaining = &remaining[end..];
+        }
+    }
+
+    Some((name?, content?))
+}
+
+fn parse_quoted_value(input: &str) -> Option<(String, &str)> {
+    let input = input.trim_start();
+    let quote = input.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let rest = &input[1..];
+    let end = rest.find(quote)?;
+    let value = rest[..end].to_string();
+    Some((value, &rest[end + 1..]))
 }
 
 /// Recursively copies a directory's contents into a destination.
@@ -246,19 +282,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn frontmatter_parsing() {
-        let input = "---\ntitle: Hello\nauthor: World\n---\n<p>body</p>";
-        let (fm, body) = parse_frontmatter(input);
-        assert_eq!(fm.get("title").unwrap(), "Hello");
-        assert_eq!(fm.get("author").unwrap(), "World");
+    fn meta_extraction() {
+        let input = "<meta name=\"title\" content=\"Hello\">\n<p>body</p>";
+        let (props, body) = extract_meta(input);
+        assert_eq!(props.get("title").unwrap(), "Hello");
         assert_eq!(body.trim(), "<p>body</p>");
     }
 
     #[test]
-    fn no_frontmatter() {
+    fn multiple_meta() {
+        let input = "<meta name=\"title\" content=\"Hi\">\n<meta name=\"lang\" content=\"fr\">\n<p>ok</p>";
+        let (props, body) = extract_meta(input);
+        assert_eq!(props.get("title").unwrap(), "Hi");
+        assert_eq!(props.get("lang").unwrap(), "fr");
+        assert_eq!(body.trim(), "<p>ok</p>");
+    }
+
+    #[test]
+    fn no_meta() {
         let input = "<p>just html</p>";
-        let (fm, body) = parse_frontmatter(input);
-        assert!(fm.is_empty());
-        assert_eq!(body, input);
+        let (props, body) = extract_meta(input);
+        assert!(props.is_empty());
+        assert_eq!(body.trim(), "<p>just html</p>");
     }
 }
