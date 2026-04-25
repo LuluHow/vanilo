@@ -2,6 +2,7 @@ mod builder;
 mod component;
 mod config;
 mod functions;
+mod lint;
 mod parser;
 mod server;
 

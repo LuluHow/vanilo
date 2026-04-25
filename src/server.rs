@@ -8,6 +8,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use flate2::write::GzEncoder;
+use flate2::Compression;
+
 use crate::config::Config;
 use crate::functions;
 
@@ -241,21 +244,70 @@ fn handle_connection(
         let effective_method = if method == "HEAD" { "GET" } else { method };
         let (status, body, content_type) = handle_function(effective_method, raw_path, &req_body, config);
         let content_type = sanitize_header_value(&content_type);
-        let response = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {len}\r\n{sec}Cache-Control: no-store\r\nConnection: close\r\n\r\n",
-            len = body.len()
-        );
-        let _ = stream.write_all(response.as_bytes());
-        if method != "HEAD" {
-            let _ = stream.write_all(body.as_bytes());
+        let body_bytes = body.as_bytes();
+
+        // On-the-fly compression for API responses (prefer brotli > gzip)
+        let accept_br = accepts_encoding(&headers_str, "br");
+        let accept_gz = accepts_encoding(&headers_str, "gzip");
+        let should_compress = (accept_br || accept_gz)
+            && is_compressible(&content_type)
+            && body_bytes.len() > 256;
+
+        if should_compress {
+            let (compressed, enc) = if accept_br {
+                (brotli_compress_fast(body_bytes), "br")
+            } else {
+                (gzip_compress(body_bytes), "gzip")
+            };
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nContent-Encoding: {enc}\r\n{sec}Cache-Control: no-store\r\nVary: Accept-Encoding\r\nConnection: close\r\n\r\n",
+                compressed.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            if method != "HEAD" {
+                let _ = stream.write_all(&compressed);
+            }
+        } else {
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {len}\r\n{sec}Cache-Control: no-store\r\nConnection: close\r\n\r\n",
+                len = body_bytes.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            if method != "HEAD" {
+                let _ = stream.write_all(body_bytes);
+            }
         }
     } else {
-        // Strip query string for static file serving
+        // Static file serving with pre-compressed variants
         let file_path = decoded_path.split('?').next().unwrap_or(&decoded_path);
-        let (status, body, content_type) = resolve_file(file_path);
-        let cache = cache_control(content_type);
+        let accept_br = accepts_encoding(&headers_str, "br");
+        let accept_gz = accepts_encoding(&headers_str, "gzip");
+        let (status, body, content_type, encoding) =
+            resolve_file(file_path, accept_br, accept_gz);
+        let cache = cache_control_for(file_path, content_type);
+
+        // ETag based on served content
+        let etag = compute_etag(&body);
+
+        // 304 Not Modified
+        let if_none_match = extract_header(&headers_str, "if-none-match");
+        if status == "200 OK" && if_none_match.as_deref() == Some(etag.as_str()) {
+            let response = format!(
+                "HTTP/1.1 304 Not Modified\r\nETag: {etag}\r\n{sec}Cache-Control: {cache}\r\nConnection: close\r\n\r\n"
+            );
+            let _ = stream.write_all(response.as_bytes());
+            return;
+        }
+
+        let mut extra = String::new();
+        if let Some(enc) = encoding {
+            extra.push_str(&format!(
+                "Content-Encoding: {enc}\r\nVary: Accept-Encoding\r\n"
+            ));
+        }
+
         let response = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{sec}Cache-Control: {cache}\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nETag: {etag}\r\n{extra}{sec}Cache-Control: {cache}\r\nConnection: close\r\n\r\n",
             body.len()
         );
         let _ = stream.write_all(response.as_bytes());
@@ -320,38 +372,34 @@ fn handle_function(method: &str, path: &str, body: &str, config: &Config) -> (&'
 }
 
 /// Resolves a URL path to a file in dist/, handling clean URLs.
-fn resolve_file(url_path: &str) -> (&'static str, Vec<u8>, &'static str) {
+/// Serves pre-compressed variants (.br, .gz) when available and accepted.
+fn resolve_file(
+    url_path: &str,
+    accept_br: bool,
+    accept_gzip: bool,
+) -> (&'static str, Vec<u8>, &'static str, Option<&'static str>) {
     let clean = url_path.trim_start_matches('/');
 
     // Block sensitive file extensions
     if is_blocked_extension(clean) {
-        return ("403 Forbidden", b"forbidden".to_vec(), "text/plain");
+        return ("403 Forbidden", b"forbidden".to_vec(), "text/plain", None);
     }
 
     let base = PathBuf::from(DIST_DIR);
 
-    // Try candidates in order:
-    // 1. Exact file (e.g. /style.css)
-    // 2. Directory index (e.g. /about -> /about/index.html)
-    // 3. As index.html (e.g. / -> /index.html)
     let candidates = if clean.is_empty() {
         vec![base.join("index.html")]
     } else {
-        vec![
-            base.join(clean),
-            base.join(clean).join("index.html"),
-        ]
+        vec![base.join(clean), base.join(clean).join("index.html")]
     };
 
-    // Resolve base directory for symlink/traversal protection
     let base_canonical = match base.canonicalize() {
         Ok(p) => p,
-        Err(_) => return ("404 Not Found", b"404 not found".to_vec(), "text/plain"),
+        Err(_) => return ("404 Not Found", b"404 not found".to_vec(), "text/plain", None),
     };
 
     for candidate in &candidates {
         if candidate.is_file() {
-            // Verify path stays within dist/ (blocks symlink escapes)
             if let Ok(canonical) = candidate.canonicalize() {
                 if !canonical.starts_with(&base_canonical) {
                     continue;
@@ -359,17 +407,35 @@ fn resolve_file(url_path: &str) -> (&'static str, Vec<u8>, &'static str) {
             } else {
                 continue;
             }
-            match fs::read(candidate) {
-                Ok(body) => {
-                    let ct = content_type(candidate.to_str().unwrap_or(""));
-                    return ("200 OK", body, ct);
+
+            let ct = content_type(candidate.to_str().unwrap_or(""));
+            let path_str = candidate.display().to_string();
+
+            // Serve pre-compressed brotli if available and accepted
+            if accept_br {
+                let br_path = format!("{path_str}.br");
+                if let Ok(body) = fs::read(&br_path) {
+                    return ("200 OK", body, ct, Some("br"));
                 }
+            }
+
+            // Serve pre-compressed gzip if available and accepted
+            if accept_gzip {
+                let gz_path = format!("{path_str}.gz");
+                if let Ok(body) = fs::read(&gz_path) {
+                    return ("200 OK", body, ct, Some("gzip"));
+                }
+            }
+
+            // Serve uncompressed
+            match fs::read(candidate) {
+                Ok(body) => return ("200 OK", body, ct, None),
                 Err(_) => continue,
             }
         }
     }
 
-    ("404 Not Found", b"404 not found".to_vec(), "text/plain")
+    ("404 Not Found", b"404 not found".to_vec(), "text/plain", None)
 }
 
 fn content_type(path: &str) -> &'static str {
@@ -408,12 +474,88 @@ fn content_type(path: &str) -> &'static str {
     }
 }
 
-fn cache_control(content_type: &str) -> &'static str {
+/// Cache-Control based on path and content type.
+/// - HTML: always revalidate
+/// - Hashed files (name.HASH.ext): immutable, 1 year
+/// - Other static: 1 day + ETag for revalidation
+fn cache_control_for(url_path: &str, content_type: &str) -> &'static str {
     if content_type.starts_with("text/html") {
         "no-cache"
+    } else if has_content_hash(url_path) {
+        "public, max-age=31536000, immutable"
     } else {
         "public, max-age=86400"
     }
+}
+
+/// Detects content-hash pattern: name.XXXXXXXX.ext (8 hex chars before final extension).
+fn has_content_hash(path: &str) -> bool {
+    let filename = path.rsplit('/').next().unwrap_or(path);
+    let parts: Vec<&str> = filename.split('.').collect();
+    if parts.len() < 3 {
+        return false;
+    }
+    let hash_part = parts[parts.len() - 2];
+    hash_part.len() == 8 && hash_part.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Checks if a specific encoding is accepted.
+fn accepts_encoding(headers: &str, encoding: &str) -> bool {
+    for line in headers.lines() {
+        if line.get(..16).is_some_and(|s| s.eq_ignore_ascii_case("accept-encoding:")) {
+            return line[16..].to_lowercase().contains(encoding);
+        }
+    }
+    false
+}
+
+/// Returns true for content types that benefit from compression.
+fn is_compressible(content_type: &str) -> bool {
+    content_type.starts_with("text/")
+        || content_type.contains("javascript")
+        || content_type.contains("json")
+        || content_type.contains("svg")
+        || content_type.contains("xml")
+}
+
+/// Compresses data with gzip (fast mode for on-the-fly API responses).
+fn gzip_compress(data: &[u8]) -> Vec<u8> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+    let _ = encoder.write_all(data);
+    encoder.finish().unwrap_or_else(|_| data.to_vec())
+}
+
+/// Compresses data with brotli (quality 4 for on-the-fly API responses).
+fn brotli_compress_fast(data: &[u8]) -> Vec<u8> {
+    let mut output = Vec::new();
+    {
+        let mut writer = brotli::CompressorWriter::new(&mut output, 4096, 4, 22);
+        let _ = writer.write_all(data);
+    }
+    output
+}
+
+/// Computes ETag from content bytes (FNV-1a hash).
+fn compute_etag(data: &[u8]) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &byte in data {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("\"{hash:x}\"")
+}
+
+/// Extracts a header value by name (case-insensitive).
+fn extract_header(headers: &str, name: &str) -> Option<String> {
+    let prefix_len = name.len() + 1;
+    for line in headers.lines() {
+        if line.len() > prefix_len
+            && line[..prefix_len].eq_ignore_ascii_case(&format!("{name}:"))
+        {
+            return Some(line[prefix_len..].trim().to_string());
+        }
+    }
+    None
 }
 
 fn url_decode(s: &str) -> String {
@@ -445,4 +587,272 @@ fn hex_val(b: u8) -> Option<u8> {
 
 fn sanitize_header_value(value: &str) -> String {
     value.chars().filter(|c| *c != '\r' && *c != '\n' && *c != '\0').collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // Cache control
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cache_html_is_no_cache() {
+        assert_eq!(cache_control_for("/index.html", "text/html; charset=utf-8"), "no-cache");
+        assert_eq!(cache_control_for("/about/index.html", "text/html; charset=utf-8"), "no-cache");
+    }
+
+    #[test]
+    fn cache_hashed_files_are_immutable() {
+        assert_eq!(
+            cache_control_for("/style.a1b2c3d4.css", "text/css"),
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(
+            cache_control_for("/main.deadbeef.js", "application/javascript"),
+            "public, max-age=31536000, immutable"
+        );
+    }
+
+    #[test]
+    fn cache_non_hashed_assets_short_lived() {
+        // Images without hash get 1-day cache, not immutable
+        assert_eq!(cache_control_for("/photo.png", "image/png"), "public, max-age=86400");
+        assert_eq!(cache_control_for("/logo.svg", "image/svg+xml"), "public, max-age=86400");
+    }
+
+    // -----------------------------------------------------------------------
+    // Content hash detection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn detects_hashed_filenames() {
+        assert!(has_content_hash("/style.a1b2c3d4.css"));
+        assert!(has_content_hash("/main.deadbeef.js"));
+        assert!(has_content_hash("/css/app.00ff00ff.css"));
+    }
+
+    #[test]
+    fn rejects_non_hashed_filenames() {
+        assert!(!has_content_hash("/style.css"));
+        assert!(!has_content_hash("/main.js"));
+        assert!(!has_content_hash("/photo.png"));
+        assert!(!has_content_hash("/index.html"));
+        // Too short to be a hash
+        assert!(!has_content_hash("/style.abc.css"));
+        // Too long
+        assert!(!has_content_hash("/style.a1b2c3d4e5.css"));
+        // Non-hex chars
+        assert!(!has_content_hash("/style.ghijklmn.css"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Accept-Encoding parsing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parses_accept_encoding_br() {
+        let headers = "GET / HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip, br\r\n";
+        assert!(accepts_encoding(headers, "br"));
+        assert!(accepts_encoding(headers, "gzip"));
+        assert!(!accepts_encoding(headers, "zstd"));
+    }
+
+    #[test]
+    fn parses_no_accept_encoding() {
+        let headers = "GET / HTTP/1.1\r\nHost: localhost\r\n";
+        assert!(!accepts_encoding(headers, "br"));
+        assert!(!accepts_encoding(headers, "gzip"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Content type detection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn content_type_css() {
+        assert_eq!(content_type("style.css"), "text/css");
+        assert_eq!(content_type("style.a1b2c3d4.css"), "text/css");
+    }
+
+    #[test]
+    fn content_type_js() {
+        assert_eq!(content_type("main.js"), "application/javascript");
+    }
+
+    #[test]
+    fn content_type_images() {
+        assert_eq!(content_type("photo.png"), "image/png");
+        assert_eq!(content_type("photo.jpg"), "image/jpeg");
+        assert_eq!(content_type("photo.webp"), "image/webp");
+        assert_eq!(content_type("icon.svg"), "image/svg+xml");
+    }
+
+    #[test]
+    fn content_type_fonts() {
+        assert_eq!(content_type("font.woff2"), "font/woff2");
+        assert_eq!(content_type("font.woff"), "font/woff");
+        assert_eq!(content_type("font.ttf"), "font/ttf");
+    }
+
+    #[test]
+    fn content_type_unknown_fallback() {
+        assert_eq!(content_type("file.xyz"), "application/octet-stream");
+    }
+
+    // -----------------------------------------------------------------------
+    // Compressibility
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn compressible_types() {
+        assert!(is_compressible("text/html; charset=utf-8"));
+        assert!(is_compressible("text/css"));
+        assert!(is_compressible("application/javascript"));
+        assert!(is_compressible("application/json"));
+        assert!(is_compressible("image/svg+xml"));
+    }
+
+    #[test]
+    fn non_compressible_types() {
+        assert!(!is_compressible("image/png"));
+        assert!(!is_compressible("image/jpeg"));
+        assert!(!is_compressible("font/woff2"));
+        assert!(!is_compressible("application/octet-stream"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Compression functions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn gzip_roundtrip() {
+        let original = b"hello world, this is a test of gzip compression";
+        let compressed = gzip_compress(original);
+        assert!(compressed.len() < original.len() || original.len() < 50);
+
+        // Verify it's valid gzip (starts with magic bytes 1f 8b)
+        assert_eq!(compressed[0], 0x1f);
+        assert_eq!(compressed[1], 0x8b);
+    }
+
+    #[test]
+    fn brotli_produces_output() {
+        let original = b"hello world, this is a test of brotli compression that needs to be reasonably long";
+        let compressed = brotli_compress_fast(original);
+        assert!(!compressed.is_empty());
+        assert!(compressed.len() < original.len());
+    }
+
+    // -----------------------------------------------------------------------
+    // ETag
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn etag_is_deterministic() {
+        let data = b"test content";
+        assert_eq!(compute_etag(data), compute_etag(data));
+    }
+
+    #[test]
+    fn etag_differs_for_different_content() {
+        assert_ne!(compute_etag(b"hello"), compute_etag(b"world"));
+    }
+
+    #[test]
+    fn etag_is_quoted() {
+        let etag = compute_etag(b"test");
+        assert!(etag.starts_with('"'));
+        assert!(etag.ends_with('"'));
+    }
+
+    // -----------------------------------------------------------------------
+    // Header extraction
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extract_header_found() {
+        let headers = "GET / HTTP/1.1\r\nHost: example.com\r\nIf-None-Match: \"abc123\"\r\n";
+        assert_eq!(
+            extract_header(headers, "if-none-match"),
+            Some("\"abc123\"".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_header_not_found() {
+        let headers = "GET / HTTP/1.1\r\nHost: example.com\r\n";
+        assert_eq!(extract_header(headers, "if-none-match"), None);
+    }
+
+    #[test]
+    fn extract_header_case_insensitive() {
+        let headers = "GET / HTTP/1.1\r\nHost: localhost\r\n";
+        assert_eq!(extract_header(headers, "host"), Some("localhost".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // URL decode
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn url_decode_plain() {
+        assert_eq!(url_decode("/about"), "/about");
+    }
+
+    #[test]
+    fn url_decode_encoded() {
+        assert_eq!(url_decode("/hello%20world"), "/hello world");
+        assert_eq!(url_decode("/a%2Fb"), "/a/b");
+    }
+
+    #[test]
+    fn url_decode_traversal_attempt() {
+        let decoded = url_decode("/..%2F..%2Fetc%2Fpasswd");
+        assert!(decoded.contains(".."));
+    }
+
+    // -----------------------------------------------------------------------
+    // Blocked extensions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn blocks_dangerous_paths() {
+        assert!(is_blocked_extension("data.db"));
+        assert!(is_blocked_extension("/path/to/.env"));
+        assert!(is_blocked_extension("secret.key"));
+        assert!(is_blocked_extension("deploy.sh"));
+        assert!(is_blocked_extension("path/.env.production"));
+    }
+
+    #[test]
+    fn allows_safe_paths() {
+        assert!(!is_blocked_extension("style.css"));
+        assert!(!is_blocked_extension("app.js"));
+        assert!(!is_blocked_extension("image.png"));
+        assert!(!is_blocked_extension("page/index.html"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Header sanitization
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sanitize_strips_crlf() {
+        assert_eq!(
+            sanitize_header_value("value\r\nInjected: bad"),
+            "valueInjected: bad"
+        );
+    }
+
+    #[test]
+    fn sanitize_strips_null() {
+        assert_eq!(sanitize_header_value("value\0hidden"), "valuehidden");
+    }
+
+    #[test]
+    fn sanitize_passes_clean_value() {
+        assert_eq!(sanitize_header_value("application/json"), "application/json");
+    }
 }
