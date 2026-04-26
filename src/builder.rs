@@ -6,6 +6,8 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 
 use crate::component;
+use crate::content;
+use crate::css;
 use crate::lint;
 use crate::parser;
 
@@ -13,6 +15,7 @@ const PAGES_DIR: &str = "pages";
 const COMPONENTS_DIR: &str = "components";
 const STATIC_DIR: &str = "static";
 const FUNCTIONS_DIR: &str = "functions";
+const CONTENT_DIR: &str = "content";
 const DIST_DIR: &str = "dist";
 const LAYOUT_FILE: &str = "layout.html";
 
@@ -31,6 +34,7 @@ pub fn init() -> Result<(), String> {
     create_dir(COMPONENTS_DIR)?;
     create_dir(STATIC_DIR)?;
     create_dir(FUNCTIONS_DIR)?;
+    create_dir(CONTENT_DIR)?;
 
     // Default layout
     if !Path::new(LAYOUT_FILE).exists() {
@@ -233,6 +237,16 @@ CMD ["simple", "serve"]
         write_file("Dockerfile", dockerfile)?;
     }
 
+    // Example content
+    let site_json = format!("{CONTENT_DIR}/site.json");
+    if !Path::new(&site_json).exists() {
+        let content_example = r#"{
+    "title": "My Site",
+    "description": "Built with simple"
+}"#;
+        write_file(&site_json, content_example)?;
+    }
+
     // .dockerignore
     if !Path::new(".dockerignore").exists() {
         let ignore = "dist/\ndata.db\n.git/\n*.db\n*.sqlite*\n*.env\n*.log\ntarget/\n";
@@ -260,6 +274,7 @@ CMD ["simple", "serve"]
     println!("  {COMPONENTS_DIR}/Header.html");
     println!("  {COMPONENTS_DIR}/Footer.html");
     println!("  {FUNCTIONS_DIR}/hello.js");
+    println!("  {CONTENT_DIR}/site.json");
     println!("  {STATIC_DIR}/style.css");
     println!("  {STATIC_DIR}/main.js");
     println!("  simple.toml");
@@ -289,6 +304,12 @@ pub fn build() -> Result<(), String> {
         None
     };
 
+    // Load content (JSON CMS)
+    let content_data = content::load(Path::new(CONTENT_DIR))?;
+    if !content_data.is_empty() {
+        println!("loaded {} content file(s)", content_data.len());
+    }
+
     // Security lint check
     lint::check(
         Path::new(PAGES_DIR),
@@ -305,7 +326,7 @@ pub fn build() -> Result<(), String> {
         return Err(format!("{PAGES_DIR}/ directory not found"));
     }
 
-    let page_count = process_dir(pages_path, pages_path, Path::new(DIST_DIR), &components, &layout, &templates_block)?;
+    let page_count = process_dir(pages_path, pages_path, Path::new(DIST_DIR), &components, &layout, &templates_block, &content_data)?;
     println!("built {page_count} page(s)");
 
     // Copy static files
@@ -313,6 +334,12 @@ pub fn build() -> Result<(), String> {
     if static_path.exists() {
         let copied = copy_dir_recursive(static_path, Path::new(DIST_DIR))?;
         println!("copied {copied} static file(s)");
+    }
+
+    // CSS tree-shaking: inline only used rules per page
+    let inlined = inline_critical_css(Path::new(DIST_DIR))?;
+    if inlined > 0 {
+        println!("inlined CSS for {inlined} page(s)");
     }
 
     // Content-hash CSS/JS filenames for cache busting
@@ -384,6 +411,7 @@ fn process_dir(
     components: &std::collections::HashMap<String, component::Component>,
     layout: &Option<String>,
     templates_block: &str,
+    content_data: &std::collections::HashMap<String, content::Value>,
 ) -> Result<usize, String> {
     let mut count = 0;
     let entries = fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))?;
@@ -393,7 +421,7 @@ fn process_dir(
         let path = entry.path();
 
         if path.is_dir() {
-            count += process_dir(&path, pages_root, dist_root, components, layout, templates_block)?;
+            count += process_dir(&path, pages_root, dist_root, components, layout, templates_block, content_data)?;
             continue;
         }
 
@@ -407,6 +435,12 @@ fn process_dir(
         // Extract <meta> tags as props, remove them from body
         let (props, body) = extract_meta(&content);
 
+        // Expand <Each content="..."> directives
+        let body = content::expand_each(&body, content_data);
+
+        // Resolve {{@...}} content placeholders (before components, so they work as props)
+        let body = content::resolve_placeholders(&body, content_data);
+
         // Resolve components in page body
         let resolved = parser::resolve(&body, components);
 
@@ -416,6 +450,9 @@ fn process_dir(
         } else {
             resolved
         };
+
+        // Resolve {{@...}} in layout (second pass for layout-level references)
+        let final_html = content::resolve_placeholders(&final_html, content_data);
 
         // Inject component templates for runtime JS rendering
         let final_html = inject_before_body_close(&final_html, templates_block);
@@ -574,6 +611,133 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<usize, String> {
     }
 
     Ok(count)
+}
+
+// ---------------------------------------------------------------------------
+// CSS tree-shaking (inline critical CSS per page)
+// ---------------------------------------------------------------------------
+
+/// Inlines tree-shaken CSS into each HTML page.
+/// Replaces `<link rel="stylesheet" href="...">` with `<style>` containing only used rules.
+/// Removes CSS files from dist/ after inlining.
+fn inline_critical_css(dist: &Path) -> Result<usize, String> {
+    let css_files = collect_css_files(dist, dist)?;
+    if css_files.is_empty() {
+        return Ok(0);
+    }
+
+    // Read CSS file contents
+    let mut css_map: Vec<(String, std::path::PathBuf, String)> = Vec::new();
+    for (url, path) in &css_files {
+        let content =
+            fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        css_map.push((url.clone(), path.clone(), content));
+    }
+
+    // Inline into every HTML file
+    let mut count = 0;
+    let mut used_urls: std::collections::HashSet<String> = std::collections::HashSet::new();
+    inline_css_walk(dist, &css_map, &mut count, &mut used_urls)?;
+
+    // Remove CSS files that were inlined
+    for (url, path, _) in &css_map {
+        if used_urls.contains(url) {
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    Ok(count)
+}
+
+fn collect_css_files(
+    dir: &Path,
+    root: &Path,
+) -> Result<Vec<(String, std::path::PathBuf)>, String> {
+    let mut files = Vec::new();
+    let entries = fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            files.extend(collect_css_files(&path, root)?);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("css") {
+            let rel = path.strip_prefix(root).map_err(|e| format!("strip: {e}"))?;
+            let url = format!("/{}", rel.display()).replace('\\', "/");
+            files.push((url, path));
+        }
+    }
+    Ok(files)
+}
+
+fn inline_css_walk(
+    dir: &Path,
+    css_map: &[(String, std::path::PathBuf, String)],
+    count: &mut usize,
+    used: &mut std::collections::HashSet<String>,
+) -> Result<(), String> {
+    let entries = fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            inline_css_walk(&path, css_map, count, used)?;
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("html") {
+            continue;
+        }
+
+        let mut html =
+            fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let mut changed = false;
+
+        for (url, _, css_content) in css_map {
+            if let Some(new_html) = replace_link_with_style(&html, url, css_content) {
+                html = new_html;
+                changed = true;
+                used.insert(url.clone());
+            }
+        }
+
+        if changed {
+            fs::write(&path, &html).map_err(|e| format!("write {}: {e}", path.display()))?;
+            *count += 1;
+        }
+    }
+    Ok(())
+}
+
+/// Finds a `<link rel="stylesheet" href="URL">` tag and replaces it with
+/// `<style>` containing tree-shaken CSS. Returns None if no matching link found.
+fn replace_link_with_style(html: &str, css_url: &str, css_content: &str) -> Option<String> {
+    let mut search_from = 0;
+    while let Some(start) = html[search_from..].find("<link ") {
+        let abs_start = search_from + start;
+        let rest = &html[abs_start..];
+        let tag_end = rest.find('>')? + 1;
+        let tag = &rest[..tag_end];
+
+        let is_stylesheet =
+            tag.contains("rel=\"stylesheet\"") || tag.contains("rel='stylesheet'");
+        let has_href = tag.contains(&format!("href=\"{css_url}\""))
+            || tag.contains(&format!("href='{css_url}'"));
+
+        if is_stylesheet && has_href {
+            let pruned = css::tree_shake(css_content, html);
+
+            let mut result = String::with_capacity(html.len() + pruned.len());
+            result.push_str(&html[..abs_start]);
+            if !pruned.is_empty() {
+                result.push_str("<style>");
+                result.push_str(&pruned);
+                result.push_str("</style>");
+            }
+            result.push_str(&html[abs_start + tag_end..]);
+            return Some(result);
+        }
+
+        search_from = abs_start + tag_end;
+    }
+
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -1268,6 +1432,66 @@ mod tests {
         let input = "<template id=\"tpl-Card\"><div>  {{title}}  </div></template>";
         let result = minify_html(input);
         assert!(result.contains("  {{title}}  "), "template content should be preserved");
+    }
+
+    // -----------------------------------------------------------------------
+    // CSS tree-shaking / inline
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn replace_link_inlines_style() {
+        let html = r#"<html><head><link rel="stylesheet" href="/style.css"></head><body><div class="card">hi</div></body></html>"#;
+        let css = ".card { color: red; } .unused { display: none; }";
+        let result = replace_link_with_style(html, "/style.css", css).unwrap();
+        assert!(result.contains("<style>"), "should have <style> tag");
+        assert!(!result.contains("<link"), "link tag should be removed");
+        assert!(result.contains(".card"));
+        assert!(!result.contains(".unused"));
+    }
+
+    #[test]
+    fn replace_link_no_match() {
+        let html = r#"<html><head><link rel="stylesheet" href="/other.css"></head><body></body></html>"#;
+        let css = "body { color: red; }";
+        assert!(replace_link_with_style(html, "/style.css", css).is_none());
+    }
+
+    #[test]
+    fn inline_critical_css_end_to_end() {
+        let dir = tempdir("inline_css");
+        let html = r#"<html><head><link rel="stylesheet" href="/style.css"></head><body><main><p>hello</p></main></body></html>"#;
+        let css = "main { padding: 1rem; } .card { border: 1px solid; } p { margin: 0; }";
+
+        fs::write(dir.join("index.html"), html).unwrap();
+        fs::write(dir.join("style.css"), css).unwrap();
+
+        let count = inline_critical_css(&dir).unwrap();
+        assert_eq!(count, 1);
+
+        let result = fs::read_to_string(dir.join("index.html")).unwrap();
+        assert!(result.contains("<style>"));
+        assert!(result.contains("main"));
+        assert!(result.contains("p{") || result.contains("p {"));
+        assert!(!result.contains(".card"));
+        assert!(!dir.join("style.css").exists(), "CSS file should be removed");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn inline_css_preserves_non_stylesheet_links() {
+        let dir = tempdir("inline_preserve");
+        let html = r#"<html><head><link rel="icon" href="/favicon.ico"><link rel="stylesheet" href="/style.css"></head><body><div>hi</div></body></html>"#;
+        fs::write(dir.join("index.html"), html).unwrap();
+        fs::write(dir.join("style.css"), "div { color: red; }").unwrap();
+
+        inline_critical_css(&dir).unwrap();
+
+        let result = fs::read_to_string(dir.join("index.html")).unwrap();
+        assert!(result.contains("rel=\"icon\""), "non-stylesheet link should remain");
+        assert!(result.contains("<style>"));
+
+        cleanup(&dir);
     }
 
     // -----------------------------------------------------------------------
