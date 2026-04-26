@@ -342,6 +342,12 @@ pub fn build() -> Result<(), String> {
         println!("inlined CSS for {inlined} page(s)");
     }
 
+    // Minify JS files in dist/
+    let minified_js = minify_js_files(Path::new(DIST_DIR))?;
+    if minified_js > 0 {
+        println!("minified {minified_js} JS file(s)");
+    }
+
     // Content-hash CSS/JS filenames for cache busting
     let renames = hash_static_assets(Path::new(DIST_DIR))?;
     if !renames.is_empty() {
@@ -738,6 +744,161 @@ fn replace_link_with_style(html: &str, css_url: &str, css_content: &str) -> Opti
     }
 
     None
+}
+
+// ---------------------------------------------------------------------------
+// JS minification
+// ---------------------------------------------------------------------------
+
+/// Minifies all `.js` files in dist/.
+fn minify_js_files(dist: &Path) -> Result<usize, String> {
+    let mut count = 0;
+    minify_js_walk(dist, &mut count)?;
+    Ok(count)
+}
+
+fn minify_js_walk(dir: &Path, count: &mut usize) -> Result<(), String> {
+    let entries = fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            minify_js_walk(&path, count)?;
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("js") {
+            continue;
+        }
+        let content =
+            fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let minified = minify_js(&content);
+        if minified.len() < content.len() {
+            fs::write(&path, &minified)
+                .map_err(|e| format!("write {}: {e}", path.display()))?;
+            *count += 1;
+        }
+    }
+    Ok(())
+}
+
+/// Minifies JavaScript: strips comments, trims lines, joins where safe.
+fn minify_js(js: &str) -> String {
+    let stripped = strip_js_comments(js);
+    let lines: Vec<&str> = stripped
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    if lines.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::with_capacity(js.len());
+    out.push_str(lines[0]);
+
+    for i in 1..lines.len() {
+        if !js_line_continues(lines[i - 1]) {
+            out.push('\n');
+        }
+        out.push_str(lines[i]);
+    }
+
+    out
+}
+
+/// Returns true when a line ends with a token that guarantees the expression
+/// continues on the next line (ASI cannot insert a semicolon here).
+fn js_line_continues(line: &str) -> bool {
+    let bytes = line.trim_end().as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+
+    let last = bytes[bytes.len() - 1];
+
+    // ++ and -- are complete postfix expressions — don't join
+    if bytes.len() >= 2 {
+        let prev = bytes[bytes.len() - 2];
+        if (last == b'+' && prev == b'+') || (last == b'-' && prev == b'-') {
+            return false;
+        }
+    }
+
+    matches!(
+        last,
+        b'{' | b'(' | b'[' | b',' | b'=' | b'?' | b':' | b'+' | b'-' | b'*'
+            | b'/' | b'%' | b'~' | b'^' | b'&' | b'|' | b'<' | b'>' | b'!'
+    )
+}
+
+/// Strips `//` and `/* */` comments from JavaScript, respecting string literals.
+fn strip_js_comments(js: &str) -> String {
+    let mut out = String::with_capacity(js.len());
+    let mut chars = js.chars().peekable();
+
+    // 0 = normal, 1 = single-quote, 2 = double-quote, 3 = backtick
+    let mut string_state: u8 = 0;
+
+    while let Some(c) = chars.next() {
+        if string_state != 0 {
+            out.push(c);
+            if c == '\\' {
+                // Escape: pass next char through
+                if let Some(nc) = chars.next() {
+                    out.push(nc);
+                }
+            } else if (string_state == 1 && c == '\'')
+                || (string_state == 2 && c == '"')
+                || (string_state == 3 && c == '`')
+            {
+                string_state = 0;
+            }
+            continue;
+        }
+
+        match c {
+            '\'' => {
+                string_state = 1;
+                out.push(c);
+            }
+            '"' => {
+                string_state = 2;
+                out.push(c);
+            }
+            '`' => {
+                string_state = 3;
+                out.push(c);
+            }
+            '/' => match chars.peek() {
+                Some(&'/') => {
+                    chars.next();
+                    for nc in chars.by_ref() {
+                        if nc == '\n' {
+                            out.push('\n');
+                            break;
+                        }
+                    }
+                }
+                Some(&'*') => {
+                    chars.next();
+                    loop {
+                        match chars.next() {
+                            Some('*') if chars.peek() == Some(&'/') => {
+                                chars.next();
+                                break;
+                            }
+                            Some(_) => {}
+                            None => break,
+                        }
+                    }
+                }
+                _ => out.push('/'),
+            },
+            _ => out.push(c),
+        }
+    }
+
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1432,6 +1593,113 @@ mod tests {
         let input = "<template id=\"tpl-Card\"><div>  {{title}}  </div></template>";
         let result = minify_html(input);
         assert!(result.contains("  {{title}}  "), "template content should be preserved");
+    }
+
+    // -----------------------------------------------------------------------
+    // JS minification
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn minify_js_strips_line_comments() {
+        let input = "var x = 1; // comment\nvar y = 2;";
+        let result = minify_js(input);
+        assert!(result.contains("var x = 1;"));
+        assert!(result.contains("var y = 2;"));
+        assert!(!result.contains("comment"));
+    }
+
+    #[test]
+    fn minify_js_strips_block_comments() {
+        let input = "var x = /* value */ 1;";
+        let result = minify_js(input);
+        assert!(result.contains("var x ="));
+        assert!(result.contains("1;"));
+        assert!(!result.contains("value"));
+    }
+
+    #[test]
+    fn minify_js_preserves_strings() {
+        let input = "var x = \"hello // world\";";
+        let result = minify_js(input);
+        assert!(result.contains("hello // world"));
+    }
+
+    #[test]
+    fn minify_js_preserves_backtick_strings() {
+        let input = "var x = `hello /* world */`;";
+        let result = minify_js(input);
+        assert!(result.contains("hello /* world */"));
+    }
+
+    #[test]
+    fn minify_js_trims_indentation() {
+        let input = "    var x = 1;\n    var y = 2;";
+        let result = minify_js(input);
+        assert!(!result.starts_with(' '));
+        assert!(result.contains("var x = 1;"));
+    }
+
+    #[test]
+    fn minify_js_removes_blank_lines() {
+        let input = "var x = 1;\n\n\nvar y = 2;";
+        let result = minify_js(input);
+        assert_eq!(result, "var x = 1;\nvar y = 2;");
+    }
+
+    #[test]
+    fn minify_js_joins_after_operator() {
+        let input = "var x =\n    5;";
+        let result = minify_js(input);
+        assert_eq!(result, "var x =5;");
+    }
+
+    #[test]
+    fn minify_js_joins_after_open_brace() {
+        let input = "if (true) {\n    x = 1;\n}";
+        let result = minify_js(input);
+        assert!(result.contains("{x = 1;"), "should join after {{");
+    }
+
+    #[test]
+    fn minify_js_preserves_return_newline() {
+        let input = "return\nx";
+        let result = minify_js(input);
+        assert!(result.contains('\n'), "newline after return must be preserved");
+    }
+
+    #[test]
+    fn minify_js_no_join_after_postfix() {
+        let input = "x++\ny = 1";
+        let result = minify_js(input);
+        assert!(result.contains("x++\n"), "should not join after ++");
+    }
+
+    #[test]
+    fn minify_js_empty() {
+        assert_eq!(minify_js(""), "");
+    }
+
+    #[test]
+    fn minify_js_comment_only() {
+        assert_eq!(minify_js("// just a comment\n"), "");
+    }
+
+    #[test]
+    fn minify_js_files_end_to_end() {
+        let dir = tempdir("minify_js");
+        let js = "// Comment\nvar x = 1;\n\n// Another\nvar y = 2;\n";
+        fs::write(dir.join("app.js"), js).unwrap();
+        fs::write(dir.join("photo.png"), "fake").unwrap();
+
+        let count = minify_js_files(&dir).unwrap();
+        assert_eq!(count, 1);
+
+        let result = fs::read_to_string(dir.join("app.js")).unwrap();
+        assert!(!result.contains("Comment"));
+        assert!(result.contains("var x = 1;"));
+        assert!(result.contains("var y = 2;"));
+
+        cleanup(&dir);
     }
 
     // -----------------------------------------------------------------------
