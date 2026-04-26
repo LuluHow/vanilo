@@ -269,11 +269,8 @@ fn handle_connection(
     }
 
     if raw_path.starts_with("/api/") {
-        // Rate limiting by IP
-        let ip = stream
-            .peer_addr()
-            .map(|a| a.ip().to_string())
-            .unwrap_or_default();
+        // Rate limiting by IP (trust X-Forwarded-For when behind a configured proxy)
+        let ip = client_ip(stream, &headers_str, config);
 
         {
             let mut map = rate_map.lock().unwrap_or_else(|e| e.into_inner());
@@ -662,6 +659,31 @@ fn hex_val(b: u8) -> Option<u8> {
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
     }
+}
+
+/// Extracts the client IP for rate limiting.
+/// When `trusted_proxy` is configured and the peer matches, uses X-Forwarded-For.
+fn client_ip(stream: &TcpStream, headers: &str, config: &Config) -> String {
+    let peer = stream
+        .peer_addr()
+        .map(|a| a.ip().to_string())
+        .unwrap_or_default();
+
+    if let Some(ref trusted) = config.trusted_proxy {
+        if peer == *trusted || trusted == "*" {
+            if let Some(xff) = extract_header(headers, "x-forwarded-for") {
+                // Take the leftmost (client) IP from the X-Forwarded-For chain
+                if let Some(first) = xff.split(',').next() {
+                    let ip = first.trim();
+                    if !ip.is_empty() {
+                        return ip.to_string();
+                    }
+                }
+            }
+        }
+    }
+
+    peer
 }
 
 fn sanitize_header_value(value: &str) -> String {

@@ -1,3 +1,5 @@
+/* vanilo:keep .card .tag .msg .results */
+
 @font-face {
     font-family: 'Geist';
     src: url('https://cdn.jsdelivr.net/npm/geist@1/dist/fonts/geist-sans/Geist-Variable.woff2') format('woff2');
@@ -28,8 +30,10 @@
     --muted: #888;
     --border: #272727;
     --surface: #141414;
+    --accent: #3b82f6;
+    --success: #22c55e;
     --radius: 8px;
-    --max-w: 680px;
+    --max-w: 720px;
     --font: 'Geist', system-ui, -apple-system, sans-serif;
     --mono: 'Geist Mono', ui-monospace, 'SF Mono', monospace;
 }
@@ -78,45 +82,47 @@ main {
     padding: 3rem 1.5rem 4rem;
 }
 
-.hero { margin-bottom: 2.5rem; }
-
-.badge {
-    display: inline-block;
-    font-family: var(--mono);
-    font-size: 0.75rem;
-    color: var(--muted);
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    padding: 0.25rem 0.75rem;
-    margin-bottom: 1.25rem;
-    letter-spacing: 0.01em;
-}
-
-.hero h1 {
-    font-size: 2.25rem;
+h1 {
+    font-size: 2rem;
     font-weight: 700;
     line-height: 1.15;
     letter-spacing: -0.035em;
+    margin-bottom: 0.5rem;
+}
+
+h2 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    letter-spacing: -0.02em;
     margin-bottom: 0.75rem;
 }
 
-.hero .sub {
+h3 {
+    font-size: 0.9375rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    margin-bottom: 0.5rem;
+}
+
+.sub {
     font-size: 1.0625rem;
     color: var(--muted);
     line-height: 1.6;
+    margin-bottom: 2.5rem;
 }
 
 hr {
     border: none;
     border-top: 1px solid var(--border);
-    margin: 0 0 2.5rem;
+    margin: 2.5rem 0;
 }
+
+/* --- Cards (used by <Each> and Vanilo.list) --- */
 
 .grid {
     display: grid;
     grid-template-columns: repeat(2, 1fr);
     gap: 1rem;
-    margin-bottom: 2.5rem;
 }
 
 .card {
@@ -128,48 +134,103 @@ hr {
 
 .card:hover { border-color: #444; }
 
-.card h3 {
-    font-size: 0.875rem;
-    font-weight: 600;
-    margin-bottom: 0.25rem;
-    letter-spacing: -0.01em;
-}
+.card h3 { margin-bottom: 0.25rem; }
 
 .card > p {
     font-size: 0.8125rem;
     color: var(--muted);
-    margin-bottom: 0.75rem;
     line-height: 1.5;
 }
 
-.card pre {
+/* --- Tags (nested component) --- */
+
+.tag {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 0.6875rem;
+    color: var(--accent);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    border-radius: 999px;
+    padding: 0.125rem 0.5rem;
+    margin-top: 0.625rem;
+    letter-spacing: 0.02em;
+}
+
+/* --- Search --- */
+
+.search-box {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 1.5rem;
+}
+
+.search-box input,
+.add-form input {
+    font-family: var(--font);
+    font-size: 0.875rem;
+    padding: 0.5rem 0.75rem;
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 0.625rem 0.75rem;
-    overflow-x: auto;
-    font-size: 0.75rem;
-    line-height: 1.5;
+    border-radius: var(--radius);
     color: var(--fg);
+    outline: none;
+    transition: border-color 0.15s;
 }
 
-.counter {
-    text-align: center;
-    padding: 2rem 0;
+.search-box input:focus,
+.add-form input:focus {
+    border-color: var(--accent);
 }
 
-.counter p { font-size: 0.9375rem; }
+.search-box input { flex: 1; }
 
-.counter strong {
-    font-family: var(--mono);
-    font-weight: 600;
-}
-
-.counter .note {
+.add-form button {
+    font-family: var(--font);
     font-size: 0.8125rem;
-    color: var(--muted);
-    margin-top: 0.375rem;
+    font-weight: 500;
+    padding: 0.5rem 1rem;
+    background: var(--fg);
+    color: var(--bg);
+    border: none;
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: opacity 0.15s;
 }
+
+.add-form button:hover { opacity: 0.85; }
+
+/* --- Results (dynamic rendering) --- */
+
+.results {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1rem;
+    min-height: 2rem;
+}
+
+/* --- Add form --- */
+
+.add-form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.add-form button {
+    align-self: flex-start;
+    margin-top: 0.25rem;
+}
+
+/* --- Feedback message --- */
+
+.msg {
+    font-size: 0.8125rem;
+    color: var(--success);
+    min-height: 1.25rem;
+    margin-top: 0.5rem;
+}
+
+/* --- Code blocks --- */
 
 code {
     font-family: var(--mono);
@@ -180,6 +241,17 @@ code {
     border: 1px solid var(--border);
 }
 
+pre {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1rem;
+    overflow-x: auto;
+    font-size: 0.8125rem;
+    line-height: 1.6;
+    margin-bottom: 1rem;
+}
+
 pre code {
     background: none;
     border: none;
@@ -187,23 +259,19 @@ pre code {
     font-size: inherit;
 }
 
-.content h1 {
-    font-size: 1.75rem;
-    font-weight: 700;
-    letter-spacing: -0.03em;
-    margin-bottom: 1.25rem;
+/* --- Docs sections --- */
+
+.doc section {
+    margin-bottom: 2.5rem;
 }
 
-.content p {
+.doc section > p {
     color: var(--muted);
     margin-bottom: 1rem;
     line-height: 1.7;
 }
 
-.content p:first-of-type {
-    font-size: 1.0625rem;
-    color: var(--fg);
-}
+/* --- Footer --- */
 
 footer {
     border-top: 1px solid var(--border);
@@ -213,9 +281,11 @@ footer {
     font-size: 0.8125rem;
 }
 
+/* --- Responsive --- */
+
 @media (max-width: 600px) {
-    .hero h1 { font-size: 1.5rem; }
-    .grid { grid-template-columns: 1fr; }
+    h1 { font-size: 1.5rem; }
+    .grid, .results { grid-template-columns: 1fr; }
     main { padding: 2rem 1.25rem 3rem; }
     header { padding: 0 1.25rem; }
 }

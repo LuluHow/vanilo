@@ -6,4 +6,8 @@ COPY src/ src/
 RUN cargo build --release
 
 FROM debian:bookworm-slim
+RUN useradd -r -s /usr/sbin/nologin vanilo
 COPY --from=builder /build/target/release/vanilo /usr/local/bin/vanilo
+WORKDIR /app
+USER vanilo
+ENTRYPOINT ["vanilo"]

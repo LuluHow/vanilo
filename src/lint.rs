@@ -376,8 +376,8 @@ fn lint_js(file: &str, content: &str, warnings: &mut Vec<Warning>) {
 }
 
 /// Detects patterns like: db.query("SELECT..." + variable  or  db.exec(`...${var}...`)
+/// Only inspects the SQL string (first argument), not the params array.
 fn has_sql_concat(line: &str) -> bool {
-    // Pattern 1: db.query("..."+  or  db.exec("..."+
     let db_call = if let Some(pos) = line.find("db.query(") {
         Some(pos + 9)
     } else {
@@ -387,17 +387,60 @@ fn has_sql_concat(line: &str) -> bool {
     let Some(start) = db_call else { return false };
     let after = &line[start..];
 
+    // Extract only the first argument (the SQL string) by finding the end of the
+    // first string literal, then checking for concat before the params separator.
+    // Look for ", [" or ", )" which marks the boundary between SQL and params.
+    let sql_arg = if let Some(sep) = find_params_separator(after) {
+        &after[..sep]
+    } else {
+        after
+    };
+
     // Check for string concat with +
-    if after.contains("\" +") || after.contains("' +") || after.contains("+ \"") || after.contains("+ '") {
+    if sql_arg.contains("\" +") || sql_arg.contains("' +") || sql_arg.contains("+ \"") || sql_arg.contains("+ '") {
         return true;
     }
 
     // Check for template literals with ${
-    if after.contains('`') && after.contains("${") {
+    if sql_arg.contains('`') && sql_arg.contains("${") {
         return true;
     }
 
     false
+}
+
+/// Finds the position of the params separator (`, [` or end `)`) after the first
+/// string argument, skipping over quoted content.
+fn find_params_separator(s: &str) -> Option<usize> {
+    let mut i = 0;
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut in_quote: Option<u8> = None;
+
+    while i < len {
+        let b = bytes[i];
+        if let Some(q) = in_quote {
+            if b == b'\\' {
+                i += 2; // skip escaped char
+                continue;
+            }
+            if b == q {
+                in_quote = None;
+            }
+        } else {
+            if b == b'"' || b == b'\'' || b == b'`' {
+                in_quote = Some(b);
+            } else if b == b',' {
+                // Found separator between SQL string and params
+                return Some(i);
+            } else if b == b')' {
+                // End of call — no params
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Detects eval() calls (but not "evaluation" or similar words).
@@ -551,6 +594,13 @@ mod tests {
         assert!(!has_sql_concat(r#"db.query("SELECT * FROM users WHERE id = ?", [id])"#));
         assert!(!has_sql_concat(r#"db.exec("INSERT INTO t VALUES (?, ?)", [a, b])"#));
         assert!(!has_sql_concat(r#"db.query("SELECT count FROM visits")"#));
+    }
+
+    #[test]
+    fn sql_concat_in_params_is_safe() {
+        // String concat inside the params array is NOT SQL injection
+        assert!(!has_sql_concat(r#"db.query("SELECT * FROM t WHERE name LIKE ?", ["%" + q + "%"])"#));
+        assert!(!has_sql_concat(r#"db.exec("INSERT INTO t VALUES (?)", [a + b])"#));
     }
 
     // -----------------------------------------------------------------------

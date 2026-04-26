@@ -7,10 +7,24 @@ use std::collections::HashSet;
 /// Returns a pruned copy of `css` containing only rules whose selectors
 /// reference tags/classes/IDs present in `html`.
 /// Always keeps @font-face, @keyframes, :root, and * rules.
+/// Selectors listed in `/* vanilo:keep .selector */` comments are preserved
+/// regardless of HTML usage (useful for classes added dynamically by JS).
 pub fn tree_shake(css: &str, html: &str) -> String {
+    let safelist = extract_safelist(css);
     let cleaned = strip_comments(css);
     let blocks = parse_blocks(&cleaned);
-    let tokens = extract_html_tokens(html);
+    let mut tokens = extract_html_tokens(html);
+
+    // Merge safelist into tokens so safelisted selectors always match
+    for entry in &safelist {
+        if entry.starts_with('.') {
+            tokens.classes.insert(entry[1..].to_string());
+        } else if entry.starts_with('#') {
+            tokens.ids.insert(entry[1..].to_string());
+        } else {
+            tokens.tags.insert(entry.to_lowercase());
+        }
+    }
 
     let mut out = String::new();
     for block in &blocks {
@@ -18,6 +32,27 @@ pub fn tree_shake(css: &str, html: &str) -> String {
     }
 
     compact(&out)
+}
+
+/// Extracts selectors from `/* vanilo:keep .selector */` comments.
+fn extract_safelist(css: &str) -> Vec<String> {
+    let mut safelist = Vec::new();
+    let mut remaining = css;
+    while let Some(start) = remaining.find("/* vanilo:keep ") {
+        let after = &remaining[start + 15..];
+        if let Some(end) = after.find("*/") {
+            let entries = after[..end].trim();
+            for entry in entries.split_whitespace() {
+                if !entry.is_empty() {
+                    safelist.push(entry.to_string());
+                }
+            }
+            remaining = &after[end + 2..];
+        } else {
+            break;
+        }
+    }
+    safelist
 }
 
 // ---------------------------------------------------------------------------
@@ -779,6 +814,34 @@ mod tests {
         let result = tree_shake(css, html);
         assert!(result.contains("a{") || result.contains("a {"));
         assert!(!result.contains("span"));
+    }
+
+    #[test]
+    fn shake_safelist_keeps_class() {
+        let css = "/* vanilo:keep .open */ .open { display: block; } .unused { color: red; }";
+        let html = "<div>hello</div>";
+        let result = tree_shake(css, html);
+        assert!(result.contains(".open"));
+        assert!(!result.contains(".unused"));
+    }
+
+    #[test]
+    fn shake_safelist_multiple() {
+        let css = "/* vanilo:keep .modal .active */ .modal { display: flex; } .active { opacity: 1; } .gone { color: red; }";
+        let html = "<div>hello</div>";
+        let result = tree_shake(css, html);
+        assert!(result.contains(".modal"));
+        assert!(result.contains(".active"));
+        assert!(!result.contains(".gone"));
+    }
+
+    #[test]
+    fn shake_safelist_tag_and_id() {
+        let css = "/* vanilo:keep dialog #overlay */ dialog { position: fixed; } #overlay { background: rgba(0,0,0,.5); }";
+        let html = "<div>hello</div>";
+        let result = tree_shake(css, html);
+        assert!(result.contains("dialog"));
+        assert!(result.contains("#overlay"));
     }
 
     #[test]

@@ -23,6 +23,10 @@ pub struct Config {
     pub permissions_policy: String,
     pub cross_origin_opener_policy: String,
     pub cross_origin_resource_policy: String,
+    // proxy
+    pub trusted_proxy: Option<String>,
+    // build
+    pub minify_js: bool,
     // webhook
     pub webhook_path: Option<String>,
     pub webhook_secret: Option<String>,
@@ -49,6 +53,8 @@ impl Default for Config {
             permissions_policy: "camera=(), microphone=(), geolocation=()".into(),
             cross_origin_opener_policy: "same-origin".into(),
             cross_origin_resource_policy: "same-origin".into(),
+            trusted_proxy: None,
+            minify_js: false,
             webhook_path: None,
             webhook_secret: None,
             webhook_rate_limit: 5,
@@ -134,6 +140,19 @@ pub fn load() -> Config {
         if let Some(s) = v.get("cross_origin_opener_policy") { config.cross_origin_opener_policy = s.clone(); }
         if let Some(s) = v.get("cross_origin_resource_policy") { config.cross_origin_resource_policy = s.clone(); }
 
+        // Proxy
+        if let Some(s) = v.get("trusted_proxy") {
+            let s = s.trim().to_string();
+            if !s.is_empty() {
+                config.trusted_proxy = Some(s);
+            }
+        }
+
+        // Build
+        if let Some(s) = v.get("minify_js") {
+            config.minify_js = s == "true" || s == "1";
+        }
+
         // Webhook
         if let Some(s) = v.get("webhook_path") {
             let s = s.trim().to_string();
@@ -175,16 +194,27 @@ fn parse_toml(content: &str) -> HashMap<String, String> {
         if line.is_empty() || line.starts_with('#') || line.starts_with('[') {
             continue;
         }
-        // Strip inline comments
-        let line = line.split('#').next().unwrap_or(line).trim();
         if let Some((key, value)) = line.split_once('=') {
             let key = key.trim();
             let value = value.trim();
-            let value = value
-                .strip_prefix('"')
-                .and_then(|v| v.strip_suffix('"'))
-                .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
-                .unwrap_or(value);
+            // Parse quoted values (preserving # inside quotes)
+            let (value, _) = if value.starts_with('"') {
+                if let Some(end) = value[1..].find('"') {
+                    (&value[1..1 + end], &value[2 + end..])
+                } else {
+                    (value, "")
+                }
+            } else if value.starts_with('\'') {
+                if let Some(end) = value[1..].find('\'') {
+                    (&value[1..1 + end], &value[2 + end..])
+                } else {
+                    (value, "")
+                }
+            } else {
+                // Unquoted: strip inline comment
+                let v = value.split('#').next().unwrap_or(value).trim();
+                (v, "")
+            };
             map.insert(key.to_string(), value.to_string());
         }
     }
@@ -216,6 +246,23 @@ mod tests {
         let input = "[server]\n# port config\nport = 3000\n";
         let values = parse_toml(input);
         assert_eq!(values.get("port").unwrap(), "3000");
+    }
+
+    #[test]
+    fn parse_toml_hash_in_quoted_string() {
+        let input = r#"csp = "default-src 'self'; script-src 'self' #hash""#;
+        let values = parse_toml(input);
+        assert_eq!(
+            values.get("csp").unwrap(),
+            "default-src 'self'; script-src 'self' #hash"
+        );
+    }
+
+    #[test]
+    fn parse_toml_unquoted_inline_comment() {
+        let input = "timeout = 10 # seconds\n";
+        let values = parse_toml(input);
+        assert_eq!(values.get("timeout").unwrap(), "10");
     }
 
     #[test]

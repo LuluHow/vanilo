@@ -391,29 +391,57 @@ fn resolve_ref<'a>(content: &'a HashMap<String, Value>, path: &str) -> Option<&'
     }
 }
 
-/// Replaces all `{{@path.to.value}}` in the HTML with resolved content values.
+/// Replaces content references in HTML:
+/// - `{{@path}}` → HTML-escaped value (safe default)
+/// - `{{{@path}}}` → raw unescaped value (opt-in for trusted HTML)
 /// Unresolved references are removed (empty string).
 pub fn resolve_placeholders(html: &str, content: &HashMap<String, Value>) -> String {
     let mut result = String::with_capacity(html.len());
     let mut remaining = html;
 
-    while let Some(start) = remaining.find("{{@") {
-        result.push_str(&remaining[..start]);
-        remaining = &remaining[start + 3..];
+    loop {
+        let Some(pos) = remaining.find("{{") else {
+            result.push_str(remaining);
+            break;
+        };
 
-        if let Some(end) = remaining.find("}}") {
-            let path = remaining[..end].trim();
-            if let Some(value) = resolve_ref(content, path) {
-                result.push_str(&value.as_str());
+        let after = &remaining[pos..];
+
+        if after.starts_with("{{{@") {
+            // Raw (unescaped): {{{@path}}}
+            result.push_str(&remaining[..pos]);
+            let path_start = &after[4..];
+            if let Some(end) = path_start.find("}}}") {
+                let path = path_start[..end].trim();
+                if let Some(value) = resolve_ref(content, path) {
+                    result.push_str(&value.as_str());
+                }
+                remaining = &path_start[end + 3..];
+            } else {
+                result.push_str("{{{@");
+                remaining = path_start;
             }
-            remaining = &remaining[end + 2..];
+        } else if after.starts_with("{{@") {
+            // Escaped: {{@path}}
+            result.push_str(&remaining[..pos]);
+            let path_start = &after[3..];
+            if let Some(end) = path_start.find("}}") {
+                let path = path_start[..end].trim();
+                if let Some(value) = resolve_ref(content, path) {
+                    result.push_str(&crate::component::escape_html(&value.as_str()));
+                }
+                remaining = &path_start[end + 2..];
+            } else {
+                result.push_str("{{@");
+                remaining = path_start;
+            }
         } else {
-            // No closing }}, output literal
-            result.push_str("{{@");
+            // Not a content reference (e.g. {{prop}}), pass through
+            result.push_str(&remaining[..pos + 2]);
+            remaining = &after[2..];
         }
     }
 
-    result.push_str(remaining);
     result
 }
 
@@ -434,8 +462,16 @@ pub fn expand_each(html: &str, content: &HashMap<String, Value>) -> String {
                         if let Value::Object(pairs) = item {
                             let mut rendered = inner.to_string();
                             for (key, val) in pairs {
+                                // Raw (unescaped): {{{key}}} — must be replaced BEFORE {{key}}
+                                let mut raw_ph = String::with_capacity(key.len() + 6);
+                                raw_ph.push_str("{{{");
+                                raw_ph.push_str(key);
+                                raw_ph.push_str("}}}");
+                                rendered = rendered.replace(&raw_ph, &val.as_str());
+
+                                // Escaped: {{key}}
                                 let placeholder = format!("{{{{{key}}}}}");
-                                rendered = rendered.replace(&placeholder, &val.as_str());
+                                rendered = rendered.replace(&placeholder, &crate::component::escape_html(&val.as_str()));
                             }
                             result.push_str(&rendered);
                         }
@@ -722,8 +758,12 @@ mod tests {
             "site".to_string(),
             parse_json(r#"{"title": "Hi"}"#).unwrap(),
         );
+        // {{@site}} is escaped — quotes become &quot;
         let result = resolve_placeholders("{{@site}}", &content);
-        assert_eq!(result, r#"{"title":"Hi"}"#);
+        assert_eq!(result, r#"{&quot;title&quot;:&quot;Hi&quot;}"#);
+        // {{{@site}}} is raw — preserves JSON as-is
+        let raw = resolve_placeholders("{{{@site}}}", &content);
+        assert_eq!(raw, r#"{"title":"Hi"}"#);
     }
 
     #[test]
@@ -747,6 +787,45 @@ mod tests {
         let result =
             resolve_placeholders("<Header title=\"{{@site.title}}\" />{{label}}", &content);
         assert_eq!(result, "<Header title=\"Hi\" />{{label}}");
+    }
+
+    #[test]
+    fn resolve_escapes_html() {
+        let mut content = HashMap::new();
+        content.insert(
+            "site".to_string(),
+            parse_json(r#"{"title": "<script>alert(1)</script>"}"#).unwrap(),
+        );
+        let result = resolve_placeholders("<h1>{{@site.title}}</h1>", &content);
+        assert_eq!(result, "<h1>&lt;script&gt;alert(1)&lt;/script&gt;</h1>");
+    }
+
+    #[test]
+    fn resolve_triple_brace_raw() {
+        let mut content = HashMap::new();
+        content.insert(
+            "site".to_string(),
+            parse_json(r#"{"html": "<b>bold</b>"}"#).unwrap(),
+        );
+        let result = resolve_placeholders("<div>{{{@site.html}}}</div>", &content);
+        assert_eq!(result, "<div><b>bold</b></div>");
+    }
+
+    #[test]
+    fn resolve_mixed_escaped_and_raw() {
+        let mut content = HashMap::new();
+        content.insert(
+            "site".to_string(),
+            parse_json(r#"{"bio": "<em>hi</em>"}"#).unwrap(),
+        );
+        let result = resolve_placeholders(
+            "<p>{{@site.bio}}</p><div>{{{@site.bio}}}</div>",
+            &content,
+        );
+        assert_eq!(
+            result,
+            "<p>&lt;em&gt;hi&lt;/em&gt;</p><div><em>hi</em></div>"
+        );
     }
 
     // -- expand_each ---------------------------------------------------------
@@ -846,6 +925,34 @@ mod tests {
             result,
             r#"<Card title="Hello" href="/blog/hello" />"#
         );
+    }
+
+    #[test]
+    fn each_escapes_html_values() {
+        let mut content = HashMap::new();
+        content.insert(
+            "items".to_string(),
+            parse_json(r#"[{"name": "<b>bold</b>"}]"#).unwrap(),
+        );
+        let result = expand_each(
+            "<Each content=\"items\"><p>{{name}}</p></Each>",
+            &content,
+        );
+        assert_eq!(result, "<p>&lt;b&gt;bold&lt;/b&gt;</p>");
+    }
+
+    #[test]
+    fn each_triple_brace_raw() {
+        let mut content = HashMap::new();
+        content.insert(
+            "items".to_string(),
+            parse_json(r#"[{"html": "<b>bold</b>"}]"#).unwrap(),
+        );
+        let result = expand_each(
+            "<Each content=\"items\"><div>{{{html}}}</div></Each>",
+            &content,
+        );
+        assert_eq!(result, "<div><b>bold</b></div>");
     }
 
     #[test]

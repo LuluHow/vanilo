@@ -829,3 +829,283 @@ fn extract_json_object(json: &str, key: &str) -> HashMap<String, String> {
     }
     map
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // is_private_ip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn private_ip_loopback() {
+        assert!(is_private_ip("127.0.0.1".parse().unwrap()));
+        assert!(is_private_ip("127.255.255.255".parse().unwrap()));
+        assert!(is_private_ip("::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn private_ip_rfc1918() {
+        assert!(is_private_ip("10.0.0.1".parse().unwrap()));
+        assert!(is_private_ip("10.255.255.255".parse().unwrap()));
+        assert!(is_private_ip("172.16.0.1".parse().unwrap()));
+        assert!(is_private_ip("172.31.255.255".parse().unwrap()));
+        assert!(is_private_ip("192.168.0.1".parse().unwrap()));
+        assert!(is_private_ip("192.168.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn private_ip_link_local() {
+        assert!(is_private_ip("169.254.0.1".parse().unwrap()));
+        assert!(is_private_ip("169.254.169.254".parse().unwrap()));
+    }
+
+    #[test]
+    fn private_ip_cgnat() {
+        assert!(is_private_ip("100.64.0.1".parse().unwrap()));
+        assert!(is_private_ip("100.127.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn private_ip_unspecified() {
+        assert!(is_private_ip("0.0.0.0".parse().unwrap()));
+        assert!(is_private_ip("::".parse().unwrap()));
+    }
+
+    #[test]
+    fn private_ip_ipv6_mapped() {
+        // ::ffff:127.0.0.1
+        assert!(is_private_ip("::ffff:127.0.0.1".parse().unwrap()));
+        // ::ffff:10.0.0.1
+        assert!(is_private_ip("::ffff:10.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn private_ip_ipv6_link_local() {
+        assert!(is_private_ip("fe80::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn private_ip_ipv6_unique_local() {
+        assert!(is_private_ip("fc00::1".parse().unwrap()));
+        assert!(is_private_ip("fd12:3456::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn public_ips_not_private() {
+        assert!(!is_private_ip("8.8.8.8".parse().unwrap()));
+        assert!(!is_private_ip("1.1.1.1".parse().unwrap()));
+        assert!(!is_private_ip("93.184.216.34".parse().unwrap()));
+        assert!(!is_private_ip("172.32.0.1".parse().unwrap())); // just outside 172.16-31
+        assert!(!is_private_ip("100.128.0.1".parse().unwrap())); // just outside CGNAT
+        assert!(!is_private_ip("2606:4700::1".parse().unwrap())); // public IPv6
+    }
+
+    // -----------------------------------------------------------------------
+    // is_private_url
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn private_url_localhost() {
+        assert!(is_private_url("http://localhost/"));
+        assert!(is_private_url("https://localhost:8080/path"));
+    }
+
+    #[test]
+    fn private_url_local_suffix() {
+        assert!(is_private_url("http://server.local/api"));
+        assert!(is_private_url("http://router.internal/"));
+    }
+
+    #[test]
+    fn private_url_metadata() {
+        assert!(is_private_url("http://169.254.169.254/latest/meta-data/"));
+        assert!(is_private_url("http://metadata.google.internal/"));
+    }
+
+    #[test]
+    fn private_url_rfc1918_ip() {
+        assert!(is_private_url("http://10.0.0.1/admin"));
+        assert!(is_private_url("http://192.168.1.1/"));
+    }
+
+    #[test]
+    fn private_url_non_http_schemes_blocked() {
+        assert!(is_private_url("file:///etc/passwd"));
+        assert!(is_private_url("ftp://internal-server/file"));
+        assert!(is_private_url("gopher://evil.com/"));
+    }
+
+    #[test]
+    fn public_urls_allowed() {
+        assert!(!is_private_url("https://example.com/api"));
+        assert!(!is_private_url("http://api.github.com/users"));
+    }
+
+    // -----------------------------------------------------------------------
+    // looks_like_numeric_ip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn numeric_ip_decimal() {
+        assert!(looks_like_numeric_ip("2130706433")); // 127.0.0.1 in decimal
+    }
+
+    #[test]
+    fn numeric_ip_hex() {
+        assert!(looks_like_numeric_ip("0x7f000001")); // 127.0.0.1 in hex
+        assert!(looks_like_numeric_ip("0X7F000001"));
+    }
+
+    #[test]
+    fn numeric_ip_octal() {
+        assert!(looks_like_numeric_ip("0177.0.0.1")); // 127.0.0.1 in octal
+    }
+
+    #[test]
+    fn not_numeric_ip() {
+        assert!(!looks_like_numeric_ip("example.com"));
+        assert!(!looks_like_numeric_ip("api.github.com"));
+        assert!(!looks_like_numeric_ip("")); // empty
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_host
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extract_host_simple() {
+        assert_eq!(extract_host("http://example.com/path"), "example.com");
+    }
+
+    #[test]
+    fn extract_host_with_port() {
+        assert_eq!(extract_host("http://example.com:8080/path"), "example.com");
+    }
+
+    #[test]
+    fn extract_host_with_userinfo() {
+        assert_eq!(extract_host("http://user:pass@example.com/path"), "example.com");
+    }
+
+    #[test]
+    fn extract_host_ipv6() {
+        assert_eq!(extract_host("http://[::1]:8080/path"), "[::1]");
+    }
+
+    #[test]
+    fn extract_host_query_fragment() {
+        assert_eq!(extract_host("http://example.com?foo=bar"), "example.com");
+        assert_eq!(extract_host("http://example.com#frag"), "example.com");
+    }
+
+    // -----------------------------------------------------------------------
+    // replace_url_host
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn replace_host_basic() {
+        assert_eq!(
+            replace_url_host("http://example.com/path", "1.2.3.4"),
+            "http://1.2.3.4/path"
+        );
+    }
+
+    #[test]
+    fn replace_host_with_port() {
+        assert_eq!(
+            replace_url_host("http://example.com:8080/path", "1.2.3.4"),
+            "http://1.2.3.4:8080/path"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // is_blocked_sql
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn blocked_sql_vacuum() {
+        assert!(is_blocked_sql("VACUUM").is_some());
+        assert!(is_blocked_sql("  VACUUM  ").is_some());
+    }
+
+    #[test]
+    fn blocked_sql_vacuum_comment_bypass() {
+        assert!(is_blocked_sql("-- bypass\nVACUUM").is_some());
+        assert!(is_blocked_sql("/* bypass */VACUUM").is_some());
+    }
+
+    #[test]
+    fn allowed_sql() {
+        assert!(is_blocked_sql("SELECT * FROM t").is_none());
+        assert!(is_blocked_sql("INSERT INTO t VALUES (1)").is_none());
+        assert!(is_blocked_sql("CREATE TABLE t (id INTEGER)").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // is_blocked_header
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn blocked_headers() {
+        assert!(is_blocked_header("Host"));
+        assert!(is_blocked_header("transfer-encoding"));
+        assert!(is_blocked_header("Connection"));
+    }
+
+    #[test]
+    fn allowed_headers() {
+        assert!(!is_blocked_header("Authorization"));
+        assert!(!is_blocked_header("Content-Type"));
+        assert!(!is_blocked_header("Accept"));
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_function
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_strips_api_prefix() {
+        // This test checks the path logic, actual file lookup requires filesystem
+        assert_eq!(resolve_function("/api/"), None); // empty after strip
+    }
+
+    #[test]
+    fn resolve_blocks_traversal() {
+        assert_eq!(resolve_function("/api/../etc/passwd"), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_json_params
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_params_empty() {
+        assert!(parse_json_params("").is_empty());
+        assert!(parse_json_params("[]").is_empty());
+    }
+
+    #[test]
+    fn parse_params_mixed() {
+        let params = parse_json_params(r#"["hello", 42, null, true, 3.14]"#);
+        assert_eq!(params.len(), 5);
+        assert!(matches!(&params[0], rusqlite::types::Value::Text(s) if s == "hello"));
+        assert!(matches!(&params[1], rusqlite::types::Value::Integer(42)));
+        assert!(matches!(&params[2], rusqlite::types::Value::Null));
+        assert!(matches!(&params[3], rusqlite::types::Value::Integer(1))); // true → 1
+        assert!(matches!(&params[4], rusqlite::types::Value::Real(f) if (*f - 3.14).abs() < 0.001));
+    }
+
+    // -----------------------------------------------------------------------
+    // json_string
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn json_string_escapes() {
+        assert_eq!(json_string("hello"), "\"hello\"");
+        assert_eq!(json_string("a\"b"), "\"a\\\"b\"");
+        assert_eq!(json_string("a\nb"), "\"a\\nb\"");
+        assert_eq!(json_string("a\\b"), "\"a\\\\b\"");
+    }
+}

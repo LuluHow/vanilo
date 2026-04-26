@@ -6,6 +6,22 @@ pub struct Component {
     pub template: String,
 }
 
+/// Escapes HTML special characters to prevent XSS.
+pub fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Loads all `.html` files from the components directory.
 pub fn load_components(dir: &Path) -> Result<HashMap<String, Component>, String> {
     let mut components = HashMap::new();
@@ -40,18 +56,26 @@ pub fn load_components(dir: &Path) -> Result<HashMap<String, Component>, String>
 }
 
 /// Renders a component by:
-/// 1. Replacing `{{prop}}` with prop values
-/// 2. Inserting children before the closing tag of the root element
+/// 1. Replacing `{{{prop}}}` with raw (unescaped) prop values
+/// 2. Replacing `{{prop}}` with HTML-escaped prop values
+/// 3. Inserting children before the closing tag of the root element
 pub fn render(template: &str, props: &HashMap<String, String>, children: &str) -> String {
     let mut output = template.to_string();
 
-    // Replace {{prop_name}} for each prop
     for (key, value) in props {
+        // Raw (unescaped): {{{prop}}} — must be replaced BEFORE {{prop}}
+        let mut raw_ph = String::with_capacity(key.len() + 6);
+        raw_ph.push_str("{{{");
+        raw_ph.push_str(key);
+        raw_ph.push_str("}}}");
+        output = output.replace(&raw_ph, value);
+
+        // Escaped: {{prop}}
         let placeholder = format!("{{{{{key}}}}}");
-        output = output.replace(&placeholder, value);
+        output = output.replace(&placeholder, &escape_html(value));
     }
 
-    // Clean up unreplaced {{placeholders}}
+    // Clean up unreplaced {{placeholders}} and {{{placeholders}}}
     output = clean_placeholders(&output);
 
     // Insert children before the root element's closing tag
@@ -67,8 +91,16 @@ pub fn render_layout(template: &str, props: &HashMap<String, String>, children: 
     let mut output = template.to_string();
 
     for (key, value) in props {
+        // Raw (unescaped): {{{prop}}} — must be replaced BEFORE {{prop}}
+        let mut raw_ph = String::with_capacity(key.len() + 6);
+        raw_ph.push_str("{{{");
+        raw_ph.push_str(key);
+        raw_ph.push_str("}}}");
+        output = output.replace(&raw_ph, value);
+
+        // Escaped: {{prop}}
         let placeholder = format!("{{{{{key}}}}}");
-        output = output.replace(&placeholder, value);
+        output = output.replace(&placeholder, &escape_html(value));
     }
 
     output = clean_placeholders(&output);
@@ -130,28 +162,36 @@ fn find_root_tag(html: &str) -> Option<String> {
 
 fn clean_placeholders(input: &str) -> String {
     let mut cleaned = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '{' && chars.peek() == Some(&'{') {
-            let mut placeholder = String::from("{{");
-            chars.next();
-            let mut found_close = false;
-            while let Some(pc) = chars.next() {
-                placeholder.push(pc);
-                if pc == '}' && chars.peek() == Some(&'}') {
-                    chars.next();
-                    placeholder.push('}');
-                    found_close = true;
-                    break;
-                }
-            }
-            if !found_close {
-                cleaned.push_str(&placeholder);
+    let mut remaining = input;
+
+    loop {
+        let Some(pos) = remaining.find("{{") else {
+            cleaned.push_str(remaining);
+            break;
+        };
+
+        cleaned.push_str(&remaining[..pos]);
+        let after = &remaining[pos..];
+
+        if after.starts_with("{{{") {
+            // Triple brace: find }}}
+            if let Some(end) = after[3..].find("}}}") {
+                remaining = &after[3 + end + 3..];
+            } else {
+                cleaned.push_str("{{{");
+                remaining = &after[3..];
             }
         } else {
-            cleaned.push(c);
+            // Double brace: find }}
+            if let Some(end) = after[2..].find("}}") {
+                remaining = &after[2 + end + 2..];
+            } else {
+                cleaned.push_str("{{");
+                remaining = &after[2..];
+            }
         }
     }
+
     cleaned
 }
 
@@ -183,11 +223,64 @@ mod tests {
     }
 
     #[test]
+    fn props_html_escaped() {
+        let mut props = HashMap::new();
+        props.insert("title".to_string(), "<script>alert(1)</script>".to_string());
+        let result = render("<h1>{{title}}</h1>", &props, "");
+        assert_eq!(result, "<h1>&lt;script&gt;alert(1)&lt;/script&gt;</h1>");
+    }
+
+    #[test]
+    fn props_triple_brace_raw() {
+        let mut props = HashMap::new();
+        props.insert("html".to_string(), "<b>bold</b>".to_string());
+        let result = render("<div>{{{html}}}</div>", &props, "");
+        assert_eq!(result, "<div><b>bold</b></div>");
+    }
+
+    #[test]
+    fn props_mixed_escaped_and_raw() {
+        let mut props = HashMap::new();
+        props.insert("title".to_string(), "<em>hi</em>".to_string());
+        let result = render("<h1>{{title}}</h1><div>{{{title}}}</div>", &props, "");
+        assert_eq!(
+            result,
+            "<h1>&lt;em&gt;hi&lt;/em&gt;</h1><div><em>hi</em></div>"
+        );
+    }
+
+    #[test]
+    fn escape_html_special_chars() {
+        assert_eq!(escape_html("a & b"), "a &amp; b");
+        assert_eq!(escape_html("<script>"), "&lt;script&gt;");
+        assert_eq!(escape_html("he said \"hi\""), "he said &quot;hi&quot;");
+        assert_eq!(escape_html("it's"), "it&#x27;s");
+    }
+
+    #[test]
+    fn clean_triple_brace_placeholders() {
+        let mut props = HashMap::new();
+        props.insert("a".to_string(), "yes".to_string());
+        // {{{missing}}} should be cleaned
+        let result = render("<p>{{a}} {{{missing}}}</p>", &props, "");
+        assert_eq!(result, "<p>yes </p>");
+    }
+
+    #[test]
     fn layout_inserts_in_body() {
         let mut props = HashMap::new();
         props.insert("title".to_string(), "Test".to_string());
         let layout = "<html><head><title>{{title}}</title></head><body></body></html>";
         let result = render_layout(layout, &props, "<p>content</p>");
         assert_eq!(result, "<html><head><title>Test</title></head><body><p>content</p></body></html>");
+    }
+
+    #[test]
+    fn layout_escapes_props() {
+        let mut props = HashMap::new();
+        props.insert("title".to_string(), "A & B".to_string());
+        let layout = "<html><head><title>{{title}}</title></head><body></body></html>";
+        let result = render_layout(layout, &props, "");
+        assert!(result.contains("<title>A &amp; B</title>"));
     }
 }

@@ -1,10 +1,10 @@
 # vanilo
 
-HTML, CSS, JS. No JSX, no virtual DOM, no 45-second builds, no 800 MB node_modules.
+A static site generator with edge functions — one Rust binary, zero dependencies.
 
-A static site generator with edge functions, written in Rust. You write HTML, run `vanilo build`, done. Need server-side logic? Drop a JS file in `functions/` and you've got an API.
+Write HTML, run `vanilo build`, done. Need server-side logic? Drop a JS file in `functions/` and you've got an API. SQLite, CSS tree-shaking, security headers, Docker deploy — all built in.
 
-**For:** devs who know how to write HTML and don't need a framework to do it for them.
+**Status:** pre-1.0. API may change. Not yet tested at scale.
 
 ## Quick start
 
@@ -26,8 +26,8 @@ Your site runs at `http://127.0.0.1:3000`. Edit, reload, that's it.
 | **Content (CMS)** | JSON in `content/`. `{{@site.title}}` in HTML. `<Each content="posts">` to iterate. |
 | **Edge functions** | Server-side JS via QuickJS. `functions/hello.js` → `/api/hello`. |
 | **SQLite** | `db.query()`, `db.exec()` — available in every function. Nothing to configure. |
-| **CSS tree-shaking** | Only the CSS rules used by each page get inlined. The rest is gone. |
-| **Client-side rendering** | `Vanilo.put()`, `Vanilo.list()` — reuse your components client-side without innerHTML. |
+| **CSS tree-shaking** | CSS rules matching each page's static HTML get inlined. Use `/* vanilo:keep .cls */` for classes added by JS. |
+| **Client-side rendering** | `Vanilo.put()`, `Vanilo.list()` — reuse your components client-side. Props are auto-escaped via DOM. |
 | **Security** | CSP, HSTS, rate limiting, SSRF protection, path traversal blocking — on by default. |
 | **Deploy** | `docker build && docker compose up`. DNS A record. That's it. |
 
@@ -67,6 +67,21 @@ An HTML file in `components/`, named in PascalCase. That's a component.
 
 Components nest inside each other. Resolution is recursive.
 
+### Escaping
+
+`{{prop}}` is **HTML-escaped** at build time (server-side) and at render time (client-side). This prevents XSS when values come from content or user input.
+
+To output trusted raw HTML, use triple braces:
+
+```html
+<div>{{{bio}}}</div>   <!-- raw: <em>hello</em> stays as HTML -->
+<p>{{bio}}</p>          <!-- escaped: &lt;em&gt;hello&lt;/em&gt; -->
+```
+
+The same applies to content placeholders: `{{@site.title}}` is escaped, `{{{@site.title}}}` is raw.
+
+Unresolved placeholders are removed.
+
 ### Client-side
 
 Every component is also emitted as a `<template>`. A minimal runtime lets you reuse them from JS:
@@ -77,7 +92,7 @@ Vanilo.put('#profile', 'UserCard', user);             // object → DOM
 Vanilo.render('Card', { title: "Hi" });               // → HTML string
 ```
 
-Props are auto-escaped. Unresolved placeholders are removed.
+Client-side props are escaped via DOM (`textContent`).
 
 ## Content (CMS)
 
@@ -135,7 +150,9 @@ docker push user/my-site
 docker compose up -d
 ```
 
-`vanilo init` generates the `Dockerfile` and `compose.yaml`. Put a reverse proxy in front (Caddy, Nginx) for HTTPS. Point DNS. You're live.
+`vanilo init` generates the `Dockerfile` and `compose.yaml`. The Dockerfile is self-contained — it builds vanilo from source in a multi-stage build.
+
+Put a reverse proxy in front (Caddy, Nginx) for HTTPS. When using a proxy, set `trusted_proxy` in `vanilo.toml` so rate limiting uses the real client IP (see Configuration).
 
 ## Configuration
 
@@ -154,6 +171,13 @@ timeout = 5             # JS execution, seconds
 memory = 32             # JS runtime, MB
 fetch_timeout = 10      # outbound HTTP, seconds
 
+# When behind a reverse proxy, set this so rate limiting uses X-Forwarded-For.
+# trusted_proxy = "127.0.0.1"    # or "*" to trust any peer
+
+# JS minification (strips comments, trims whitespace). Off by default —
+# the minifier does not handle regex literals. Enable for simple JS only.
+# minify_js = true
+
 [security_headers]
 content_security_policy = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
 # strict_transport_security = "max-age=63072000; includeSubDomains"
@@ -170,13 +194,27 @@ Set a header to `""` to disable it.
 
 On by default. No config needed.
 
+- **HTML escaping** — `{{prop}}` and `{{@content}}` are HTML-escaped at build time. Use `{{{triple}}}` to opt out
+- **Build linter** — blocks `{{prop}}` in `onclick`, `javascript:`, `<script>`, `style=` attributes. Blocks `eval()`, SQL concat, `document.write()` in edge functions
 - **Path traversal** — `..`, null bytes, symlinks outside `dist/` blocked
 - **Blocked extensions** — `.db`, `.env`, `.key`, `.pem`, `.sql`, `.log` etc. never served
-- **Rate limiting** — per-IP on `/api/*`
-- **SSRF** — `fetch()` blocks private IPs, localhost, link-local
-- **SQL injection** — parameterized queries, restrictive SQLite authorizer
-- **JS sandbox** — capped memory, timeout, stack limit
-- **Headers** — CSP, HSTS, X-Frame-Options, nosniff — all enabled
+- **Rate limiting** — per-IP on `/api/*` (set `trusted_proxy` when behind a reverse proxy)
+- **SSRF** — `fetch()` blocks private IPs, localhost, link-local, cloud metadata, numeric-encoded IPs. DNS pre-resolved to prevent rebinding
+- **SQL injection** — parameterized queries required. Restrictive SQLite authorizer (no ATTACH, no triggers, no load_extension)
+- **JS sandbox** — QuickJS with capped memory, timeout, stack limit
+- **Headers** — CSP, HSTS, X-Frame-Options, COOP, CORP, nosniff — all enabled
+
+## CSS tree-shaking
+
+At build time, each HTML page's `<link rel="stylesheet">` is replaced by an inline `<style>` containing only the CSS rules that match elements in that page. Unused rules are dropped.
+
+**Limitation:** the tree-shaker scans static HTML only. Classes added dynamically by JS (e.g. `el.classList.add('open')`) are not detected. To preserve those rules, add a safelist comment in your CSS:
+
+```css
+/* vanilo:keep .open .modal .active */
+```
+
+Multiple selectors can be listed in a single comment. Tags, classes, and IDs are supported.
 
 ## Webhook (auto-rebuild on push)
 
@@ -204,3 +242,13 @@ vanilo init              # scaffold the project
 vanilo build             # generate dist/
 vanilo serve [port]      # build + dev server
 ```
+
+## Limits & non-goals
+
+vanilo ships sites, not infrastructure. These are the current trade-offs:
+
+- **Single instance.** SQLite is local. Rate limiting is per-process. This is not designed for horizontal scaling or load balancers.
+- **Config is flat TOML.** The parser handles `key = "value"` pairs. Arrays, nested tables, and multiline strings are not supported.
+- **JS minification is basic.** When enabled (`minify_js = true`), it strips comments and collapses whitespace, but does not understand regex literals. Off by default.
+- **CSS tree-shaking is static.** It scans HTML at build time. JS-added classes need a `/* vanilo:keep */` safelist comment.
+- **No hot reload.** `vanilo serve` builds once on start. Edit and restart, or set up a webhook for git-based content.
