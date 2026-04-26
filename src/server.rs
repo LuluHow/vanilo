@@ -109,7 +109,7 @@ impl Drop for ConnectionGuard {
     }
 }
 
-pub fn serve(config: Config) -> Result<(), String> {
+pub fn serve(config: Config, build_lock: Arc<Mutex<()>>) -> Result<(), String> {
     let addr = format!("{}:{}", config.host, config.port);
     let listener = TcpListener::bind(&addr).map_err(|e| format!("bind {addr}: {e}"))?;
     println!("serving on http://{addr}");
@@ -120,7 +120,6 @@ pub fn serve(config: Config) -> Result<(), String> {
     let active = Arc::new(AtomicUsize::new(0));
     let webhook_rate: Arc<Mutex<(usize, Instant)>> =
         Arc::new(Mutex::new((0, Instant::now())));
-    let build_lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
     let components: Arc<HashMap<String, Component>> = Arc::new(
         component::load_components(std::path::Path::new("components")).unwrap_or_default(),
     );

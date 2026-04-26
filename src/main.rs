@@ -7,9 +7,12 @@ mod functions;
 mod lint;
 mod parser;
 mod server;
+mod typescript;
+mod watcher;
 
 use std::env;
 use std::process;
+use std::sync::{Arc, Mutex};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -36,7 +39,14 @@ fn main() {
             if let Some(port) = args.get(2).and_then(|s| s.parse().ok()) {
                 cfg.port = port;
             }
-            if let Err(e) = server::serve(cfg) {
+            let build_lock = Arc::new(Mutex::new(()));
+            let lock_clone = build_lock.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = watcher::watch(lock_clone) {
+                    eprintln!("watch error: {e}");
+                }
+            });
+            if let Err(e) = server::serve(cfg, build_lock) {
                 eprintln!("error: {e}");
                 process::exit(1);
             }

@@ -116,13 +116,13 @@ Collections with `<Each>`:
 
 ## Edge functions
 
-A JS file in `functions/`, a `handler(req)` function. That's it.
+A JS or TS file in `functions/`, a `handler(req)` function. That's it.
 
-```javascript
-// functions/hello.js
-function handler(req) {
-    // req.method, req.path, req.body, req.query
+```typescript
+// functions/hello.ts
+interface Req { method: string; path: string; body: string; query: string; }
 
+function handler(req: Req) {
     db.exec("CREATE TABLE IF NOT EXISTS visits (count INTEGER)");
     var row = db.query("SELECT count FROM visits");
 
@@ -132,6 +132,8 @@ function handler(req) {
     }
 }
 ```
+
+TypeScript is supported out of the box — type annotations, interfaces, enums, and generics are stripped at runtime via [oxc](https://oxc.rs). Plain `.js` files work as before. When both `hello.js` and `hello.ts` exist, `.js` takes priority.
 
 | File | URL |
 |------|-----|
@@ -240,15 +242,19 @@ Then add the URL as a webhook in your GitHub/Gitea repo settings (Content type: 
 ```
 vanilo init              # scaffold the project
 vanilo build             # generate dist/
-vanilo serve [port]      # build + dev server
+vanilo serve [port]      # build + dev server (with hot reload)
 ```
+
+`vanilo serve` watches `pages/`, `components/`, `static/`, `functions/`, `content/`, `layout.html`, and `vanilo.toml` for changes and rebuilds automatically (300ms debounce). No browser live-reload — refresh manually.
 
 ## Limits & non-goals
 
 vanilo ships sites, not infrastructure. These are the current trade-offs:
 
 - **Single instance.** SQLite is local. Rate limiting is per-process. This is not designed for horizontal scaling or load balancers.
-- **Config is flat TOML.** The parser handles `key = "value"` pairs. Arrays, nested tables, and multiline strings are not supported.
 - **JS minification is basic.** When enabled (`minify_js = true`), it strips comments and collapses whitespace, but does not understand regex literals. Off by default.
 - **CSS tree-shaking is static.** It scans HTML at build time. JS-added classes need a `/* vanilo:keep */` safelist comment.
-- **No hot reload.** `vanilo serve` builds once on start. Edit and restart, or set up a webhook for git-based content.
+- **No browser live-reload.** `vanilo serve` rebuilds on file changes but does not inject a live-reload script. Refresh manually.
+- **No JS bundling.** No module system, no JS tree-shaking.
+- **No incremental SSG.** Every build regenerates everything.
+- **HTTP/1.1 only.** The server does not support HTTP/2.

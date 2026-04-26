@@ -267,7 +267,8 @@ fn lint_js_dir(dir: &Path, warnings: &mut Vec<Warning>) {
             lint_js_dir(&path, warnings);
             continue;
         }
-        if path.extension().and_then(|e| e.to_str()) != Some("js") {
+        let ext = path.extension().and_then(|e| e.to_str());
+        if ext != Some("js") && ext != Some("ts") {
             continue;
         }
         if let Ok(content) = fs::read_to_string(&path) {

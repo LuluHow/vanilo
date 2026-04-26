@@ -11,3 +11,12 @@ rusqlite = { version = "0.39.0", features = ["bundled", "hooks"] }
 ureq = "3.3.0"
 hmac = "0.12"
 sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+notify = "7"
+oxc_allocator = "0.127"
+oxc_parser = "0.127"
+oxc_codegen = "0.127"
+oxc_span = "0.127"
+oxc_transformer = "0.127"
+oxc_semantic = "0.127"

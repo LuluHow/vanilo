@@ -32,7 +32,8 @@ pub struct FnResponse {
     pub body: String,
 }
 
-/// Resolves /api/hello -> functions/hello.js
+/// Resolves /api/hello -> functions/hello.js or functions/hello.ts
+/// Priority: .js > .ts (explicit JS overrides TS)
 pub fn resolve_function(api_path: &str) -> Option<String> {
     let path = api_path.split('?').next().unwrap_or(api_path);
     let clean = path.strip_prefix("/api/").unwrap_or(path).trim_end_matches('/');
@@ -41,21 +42,35 @@ pub fn resolve_function(api_path: &str) -> Option<String> {
         return None;
     }
 
-    let file_path = format!("{FUNCTIONS_DIR}/{clean}.js");
-    if Path::new(&file_path).is_file() {
-        return Some(file_path);
+    let js_path = format!("{FUNCTIONS_DIR}/{clean}.js");
+    if Path::new(&js_path).is_file() {
+        return Some(js_path);
     }
-    let index_path = format!("{FUNCTIONS_DIR}/{clean}/index.js");
-    if Path::new(&index_path).is_file() {
-        return Some(index_path);
+    let ts_path = format!("{FUNCTIONS_DIR}/{clean}.ts");
+    if Path::new(&ts_path).is_file() {
+        return Some(ts_path);
+    }
+    let js_index = format!("{FUNCTIONS_DIR}/{clean}/index.js");
+    if Path::new(&js_index).is_file() {
+        return Some(js_index);
+    }
+    let ts_index = format!("{FUNCTIONS_DIR}/{clean}/index.ts");
+    if Path::new(&ts_index).is_file() {
+        return Some(ts_index);
     }
     None
 }
 
-/// Executes a JS function file with the given request.
+/// Executes a JS/TS function file with the given request.
 pub fn execute(file_path: &str, req: &FnRequest, config: &Config) -> Result<FnResponse, String> {
     let source =
         fs::read_to_string(file_path).map_err(|e| format!("read {file_path}: {e}"))?;
+    let source = if file_path.ends_with(".ts") {
+        crate::typescript::strip_types(&source)
+            .map_err(|e| format!("typescript error in {file_path}: {e}"))?
+    } else {
+        source
+    };
 
     let rt = Runtime::new().map_err(|e| format!("quickjs runtime: {e}"))?;
     rt.set_memory_limit(config.memory);
@@ -1129,6 +1144,41 @@ mod tests {
     #[test]
     fn resolve_blocks_traversal() {
         assert_eq!(resolve_function("/api/../etc/passwd"), None);
+    }
+
+    #[test]
+    fn resolve_ts_function() {
+        // Create a temp .ts file and verify it resolves
+        let dir = format!("{FUNCTIONS_DIR}/__test_ts");
+        let _ = std::fs::create_dir_all(&dir);
+        let ts_file = format!("{dir}/hello.ts");
+        std::fs::write(&ts_file, "function handler(req: any) { return { status: 200 }; }").unwrap();
+
+        let result = resolve_function("/api/__test_ts/hello");
+        assert_eq!(result, Some(ts_file.clone()));
+
+        // Cleanup
+        let _ = std::fs::remove_file(&ts_file);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn resolve_js_over_ts() {
+        // When both .js and .ts exist, .js should win
+        let dir = format!("{FUNCTIONS_DIR}/__test_priority");
+        let _ = std::fs::create_dir_all(&dir);
+        let js_file = format!("{dir}/dual.js");
+        let ts_file = format!("{dir}/dual.ts");
+        std::fs::write(&js_file, "function handler(req) { return { status: 200 }; }").unwrap();
+        std::fs::write(&ts_file, "function handler(req: any) { return { status: 200 }; }").unwrap();
+
+        let result = resolve_function("/api/__test_priority/dual");
+        assert_eq!(result, Some(js_file.clone()));
+
+        // Cleanup
+        let _ = std::fs::remove_file(&js_file);
+        let _ = std::fs::remove_file(&ts_file);
+        let _ = std::fs::remove_dir(&dir);
     }
 
     // -----------------------------------------------------------------------
