@@ -37,7 +37,7 @@ impl Default for Config {
             timeout: 5,
             memory: 32 * 1024 * 1024,    // 32 MB
             fetch_timeout: 10,
-            content_security_policy: "default-src 'self'; style-src 'self' 'unsafe-inline'".into(),
+            content_security_policy: "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'".into(),
             strict_transport_security: "max-age=63072000; includeSubDomains".into(),
             x_frame_options: "DENY".into(),
             referrer_policy: "strict-origin-when-cross-origin".into(),

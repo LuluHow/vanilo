@@ -212,7 +212,7 @@ memory = 32             # JS runtime memory limit, MB
 fetch_timeout = 10      # outbound HTTP timeout, seconds
 
 [security_headers]
-content_security_policy = "default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' https://cdn.jsdelivr.net"
+content_security_policy = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self' https://cdn.jsdelivr.net"
 # Uncomment to override other defaults. Empty string disables a header.
 # strict_transport_security = "max-age=63072000; includeSubDomains"
 # x_frame_options = "DENY"
