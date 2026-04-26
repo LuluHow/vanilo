@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -17,6 +18,8 @@ const STATIC_DIR: &str = "static";
 const FUNCTIONS_DIR: &str = "functions";
 const CONTENT_DIR: &str = "content";
 const DIST_DIR: &str = "dist";
+const DIST_TMP: &str = "dist_tmp";
+const DIST_OLD: &str = "dist_old";
 const LAYOUT_FILE: &str = "layout.html";
 
 /// Minimal client-side runtime for rendering components from <template> elements.
@@ -196,7 +199,8 @@ docker compose up -d</code></pre>
 
     // Config
     if !Path::new("vanilo.toml").exists() {
-        let config = r#"# vanilo.toml — project configuration
+        let hook_id = random_hex(16);
+        let config = format!(r#"# vanilo.toml — project configuration
 # Override port/host with env vars: PORT, HOST
 
 port = 3000
@@ -220,8 +224,17 @@ content_security_policy = "default-src 'self'; script-src 'self' 'unsafe-inline'
 # permissions_policy = "camera=(), microphone=(), geolocation=()"
 # cross_origin_opener_policy = "same-origin"
 # cross_origin_resource_policy = "same-origin"
-"#;
-        write_file("vanilo.toml", config)?;
+
+[webhook]
+# Git-based CMS: auto-rebuild on push via GitHub/Gitea webhook.
+# Uncomment both lines below, then add the URL as a webhook in your repo settings.
+# The path is unique per project — keep it secret.
+# webhook_path = "/_hook/{hook_id}"
+# webhook_secret = "change-me"
+# webhook_rate_limit = 5      # max rebuilds per window
+# webhook_rate_window = 60    # seconds
+"#);
+        write_file("vanilo.toml", &config)?;
     }
 
     // Dockerfile
@@ -287,11 +300,11 @@ CMD ["vanilo", "serve"]
 
 /// Builds the site: resolves components, wraps in layout, outputs to dist/.
 pub fn build() -> Result<(), String> {
-    // Clean dist
-    if Path::new(DIST_DIR).exists() {
-        fs::remove_dir_all(DIST_DIR).map_err(|e| format!("clean dist: {e}"))?;
+    // Build into temp directory, then atomically swap
+    if Path::new(DIST_TMP).exists() {
+        fs::remove_dir_all(DIST_TMP).map_err(|e| format!("clean dist_tmp: {e}"))?;
     }
-    fs::create_dir_all(DIST_DIR).map_err(|e| format!("create dist: {e}"))?;
+    fs::create_dir_all(DIST_TMP).map_err(|e| format!("create dist_tmp: {e}"))?;
 
     // Load components
     let components = component::load_components(Path::new(COMPONENTS_DIR))?;
@@ -330,40 +343,56 @@ pub fn build() -> Result<(), String> {
         return Err(format!("{PAGES_DIR}/ directory not found"));
     }
 
-    let page_count = process_dir(pages_path, pages_path, Path::new(DIST_DIR), &components, &layout, &templates_block, &content_data)?;
+    let page_count = process_dir(pages_path, pages_path, Path::new(DIST_TMP), &components, &layout, &templates_block, &content_data)?;
     println!("built {page_count} page(s)");
 
     // Copy static files
     let static_path = Path::new(STATIC_DIR);
     if static_path.exists() {
-        let copied = copy_dir_recursive(static_path, Path::new(DIST_DIR))?;
+        let copied = copy_dir_recursive(static_path, Path::new(DIST_TMP))?;
         println!("copied {copied} static file(s)");
     }
 
     // CSS tree-shaking: inline only used rules per page
-    let inlined = inline_critical_css(Path::new(DIST_DIR))?;
+    let inlined = inline_critical_css(Path::new(DIST_TMP))?;
     if inlined > 0 {
         println!("inlined CSS for {inlined} page(s)");
     }
 
     // Minify JS files in dist/
-    let minified_js = minify_js_files(Path::new(DIST_DIR))?;
+    let minified_js = minify_js_files(Path::new(DIST_TMP))?;
     if minified_js > 0 {
         println!("minified {minified_js} JS file(s)");
     }
 
     // Content-hash CSS/JS filenames for cache busting
-    let renames = hash_static_assets(Path::new(DIST_DIR))?;
+    let renames = hash_static_assets(Path::new(DIST_TMP))?;
     if !renames.is_empty() {
-        rewrite_html_refs(Path::new(DIST_DIR), &renames)?;
+        rewrite_html_refs(Path::new(DIST_TMP), &renames)?;
         println!("hashed {} asset(s)", renames.len());
     }
 
     // Pre-compress with gzip + brotli
-    let compressed = precompress_dir(Path::new(DIST_DIR))?;
+    let compressed = precompress_dir(Path::new(DIST_TMP))?;
     if compressed > 0 {
         println!("pre-compressed {compressed} file(s)");
     }
+
+    // Atomic swap: dist_tmp -> dist
+    if Path::new(DIST_OLD).exists() {
+        fs::remove_dir_all(DIST_OLD).map_err(|e| format!("clean dist_old: {e}"))?;
+    }
+    if Path::new(DIST_DIR).exists() {
+        fs::rename(DIST_DIR, DIST_OLD).map_err(|e| format!("rename dist -> dist_old: {e}"))?;
+    }
+    if let Err(e) = fs::rename(DIST_TMP, DIST_DIR) {
+        // Recovery: restore old dist
+        if Path::new(DIST_OLD).exists() {
+            let _ = fs::rename(DIST_OLD, DIST_DIR);
+        }
+        return Err(format!("rename dist_tmp -> dist: {e}"));
+    }
+    let _ = fs::remove_dir_all(DIST_OLD);
 
     println!("-> {DIST_DIR}/");
     Ok(())
@@ -1250,6 +1279,24 @@ fn create_dir(path: &str) -> Result<(), String> {
 
 fn write_file(path: &str, content: &str) -> Result<(), String> {
     fs::write(path, content).map_err(|e| format!("write {path}: {e}"))
+}
+
+/// Generates a random hex string of `len` characters using timestamp + PID as seed.
+fn random_hex(len: usize) -> String {
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        ^ (std::process::id() as u128);
+    let mut state = seed;
+    let mut out = String::with_capacity(len);
+    for _ in 0..len {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        out.push_str(&format!("{:x}", (state & 0xf) as u8));
+    }
+    out
 }
 
 #[cfg(test)]

@@ -11,6 +11,10 @@ use std::time::{Duration, Instant};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+
+use crate::builder;
 use crate::config::Config;
 use crate::functions;
 
@@ -65,6 +69,13 @@ pub fn serve(config: Config) -> Result<(), String> {
     let rate_map: Arc<Mutex<HashMap<String, (usize, Instant)>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let active = Arc::new(AtomicUsize::new(0));
+    let webhook_rate: Arc<Mutex<(usize, Instant)>> =
+        Arc::new(Mutex::new((0, Instant::now())));
+    let build_lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
+
+    if config.webhook_path.is_some() && config.webhook_secret.is_some() {
+        println!("webhook enabled on {}", config.webhook_path.as_ref().unwrap());
+    }
 
     for stream in listener.incoming() {
         let mut stream = match stream {
@@ -83,12 +94,14 @@ pub fn serve(config: Config) -> Result<(), String> {
 
         let rate = rate_map.clone();
         let cfg = config.clone();
+        let wh_rate = webhook_rate.clone();
+        let wh_lock = build_lock.clone();
         active.fetch_add(1, Ordering::Relaxed);
         let guard = ConnectionGuard(active.clone());
 
         thread::spawn(move || {
             let _guard = guard;
-            handle_connection(&mut stream, &rate, &cfg);
+            handle_connection(&mut stream, &rate, &cfg, &wh_rate, &wh_lock);
         });
     }
 
@@ -99,6 +112,8 @@ fn handle_connection(
     stream: &mut TcpStream,
     rate_map: &Mutex<HashMap<String, (usize, Instant)>>,
     config: &Config,
+    webhook_rate: &Mutex<(usize, Instant)>,
+    build_lock: &Arc<Mutex<()>>,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
@@ -188,6 +203,70 @@ fn handle_connection(
     }
 
     let sec = config.security_headers();
+
+    // Webhook endpoint — only exists when both path and secret are configured
+    if let (Some(hook_path), Some(hook_secret)) = (&config.webhook_path, &config.webhook_secret) {
+        if decoded_path == hook_path.as_str() {
+            if method != "POST" {
+                let resp = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = stream.write_all(resp.as_bytes());
+                return;
+            }
+
+            // Webhook-specific rate limiting
+            {
+                let mut wh = webhook_rate.lock().unwrap_or_else(|e| e.into_inner());
+                let now = Instant::now();
+                if now.duration_since(wh.1).as_secs() >= config.webhook_rate_window {
+                    *wh = (0, now);
+                }
+                wh.0 += 1;
+                if wh.0 > config.webhook_rate_limit {
+                    eprintln!("webhook: rate limited");
+                    let resp = "HTTP/1.1 429 Too Many Requests\r\nContent-Type: text/plain\r\nContent-Length: 12\r\nConnection: close\r\n\r\nrate limited";
+                    let _ = stream.write_all(resp.as_bytes());
+                    return;
+                }
+            }
+
+            // Verify HMAC-SHA256 signature (X-Hub-Signature-256: sha256=...)
+            let valid = match extract_header(&headers_str, "x-hub-signature-256") {
+                Some(sig) => verify_webhook_signature(hook_secret, body_buf.as_slice(), &sig),
+                None => {
+                    eprintln!("webhook: rejected (missing signature)");
+                    false
+                }
+            };
+
+            if !valid {
+                eprintln!("webhook: rejected (invalid signature)");
+                let resp = "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: 9\r\nConnection: close\r\n\r\nforbidden";
+                let _ = stream.write_all(resp.as_bytes());
+                return;
+            }
+
+            // Respond immediately, rebuild in background
+            let resp = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+            let _ = stream.write_all(resp.as_bytes());
+
+            let lock = build_lock.clone();
+            thread::spawn(move || {
+                let _guard = match lock.try_lock() {
+                    Ok(g) => g,
+                    Err(_) => {
+                        eprintln!("webhook: rebuild already in progress, skipping");
+                        return;
+                    }
+                };
+                eprintln!("webhook: rebuilding...");
+                match builder::build() {
+                    Ok(()) => eprintln!("webhook: rebuild completed"),
+                    Err(e) => eprintln!("webhook: rebuild failed: {e}"),
+                }
+            });
+            return;
+        }
+    }
 
     if raw_path.starts_with("/api/") {
         // Rate limiting by IP
@@ -587,6 +666,36 @@ fn hex_val(b: u8) -> Option<u8> {
 
 fn sanitize_header_value(value: &str) -> String {
     value.chars().filter(|c| *c != '\r' && *c != '\n' && *c != '\0').collect()
+}
+
+/// Verifies a GitHub-style HMAC-SHA256 webhook signature.
+/// Header format: sha256=<hex-encoded-hmac>
+fn verify_webhook_signature(secret: &str, payload: &[u8], signature_header: &str) -> bool {
+    let hex_sig = match signature_header.strip_prefix("sha256=") {
+        Some(h) => h,
+        None => return false,
+    };
+    let sig_bytes = match hex_decode(hex_sig) {
+        Some(b) => b,
+        None => return false,
+    };
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+        .expect("HMAC accepts any key size");
+    mac.update(payload);
+    mac.verify_slice(&sig_bytes).is_ok()
+}
+
+fn hex_decode(hex: &str) -> Option<Vec<u8>> {
+    if hex.len() % 2 != 0 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    for chunk in hex.as_bytes().chunks(2) {
+        let hi = hex_val(chunk[0])?;
+        let lo = hex_val(chunk[1])?;
+        bytes.push((hi << 4) | lo);
+    }
+    Some(bytes)
 }
 
 #[cfg(test)]

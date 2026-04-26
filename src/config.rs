@@ -23,6 +23,11 @@ pub struct Config {
     pub permissions_policy: String,
     pub cross_origin_opener_policy: String,
     pub cross_origin_resource_policy: String,
+    // webhook
+    pub webhook_path: Option<String>,
+    pub webhook_secret: Option<String>,
+    pub webhook_rate_limit: usize,
+    pub webhook_rate_window: u64,
 }
 
 impl Default for Config {
@@ -44,6 +49,10 @@ impl Default for Config {
             permissions_policy: "camera=(), microphone=(), geolocation=()".into(),
             cross_origin_opener_policy: "same-origin".into(),
             cross_origin_resource_policy: "same-origin".into(),
+            webhook_path: None,
+            webhook_secret: None,
+            webhook_rate_limit: 5,
+            webhook_rate_window: 60,
         }
     }
 }
@@ -124,6 +133,26 @@ pub fn load() -> Config {
         if let Some(s) = v.get("permissions_policy") { config.permissions_policy = s.clone(); }
         if let Some(s) = v.get("cross_origin_opener_policy") { config.cross_origin_opener_policy = s.clone(); }
         if let Some(s) = v.get("cross_origin_resource_policy") { config.cross_origin_resource_policy = s.clone(); }
+
+        // Webhook
+        if let Some(s) = v.get("webhook_path") {
+            let s = s.trim().to_string();
+            if !s.is_empty() {
+                config.webhook_path = Some(if s.starts_with('/') { s } else { format!("/{s}") });
+            }
+        }
+        if let Some(s) = v.get("webhook_secret") {
+            let s = s.trim().to_string();
+            if !s.is_empty() {
+                config.webhook_secret = Some(s);
+            }
+        }
+        if let Some(n) = v.get("webhook_rate_limit").and_then(|s| s.parse().ok()) {
+            config.webhook_rate_limit = n;
+        }
+        if let Some(n) = v.get("webhook_rate_window").and_then(|s| s.parse().ok()) {
+            config.webhook_rate_window = n;
+        }
     }
 
     // Env vars override config file
