@@ -42,7 +42,7 @@ fn main() {
             }
         }
         _ => {
-            eprintln!("usage: simple <build|init|serve [port]>");
+            eprintln!("usage: vanilo <build|init|serve [port]>");
             process::exit(1);
         }
     }

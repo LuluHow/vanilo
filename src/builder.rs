@@ -21,7 +21,7 @@ const LAYOUT_FILE: &str = "layout.html";
 
 /// Minimal client-side runtime for rendering components from <template> elements.
 const TEMPLATES_RUNTIME: &str = r#"<script>(function(){
-var S=window.Simple={};
+var S=window.Vanilo={};
 S.esc=function(s){var d=document.createElement("div");d.appendChild(document.createTextNode(s));return d.innerHTML};
 S.render=function(n,p){var t=document.getElementById("tpl-"+n);if(!t)return"";var h=t.innerHTML;if(p){var k=Object.keys(p);for(var i=0;i<k.length;i++){var v=p[k[i]]!=null?String(p[k[i]]):"";h=h.split("{{"+k[i]+"}}").join(S.esc(v))}}return h.replace(/\{\{[^}]+\}\}/g,"")};
 S.put=function(sel,n,p){var el=typeof sel==="string"?document.querySelector(sel):sel;if(el)el.innerHTML=S.render(n,p)};
@@ -66,7 +66,7 @@ pub fn init() -> Result<(), String> {
     let footer_path = format!("{COMPONENTS_DIR}/Footer.html");
     if !Path::new(&footer_path).exists() {
         write_file(&footer_path, r#"<footer>
-    <p>Built with simple</p>
+    <p>Built with vanilo</p>
 </footer>"#)?;
     }
 
@@ -75,7 +75,7 @@ pub fn init() -> Result<(), String> {
     if !Path::new(&index_path).exists() {
         let index = r#"<meta name="title" content="Home">
 
-<Header title="simple">
+<Header title="vanilo">
     <nav>
         <a href="/">Home</a>
         <a href="/about">About</a>
@@ -84,9 +84,9 @@ pub fn init() -> Result<(), String> {
 
 <main>
     <section class="hero">
-        <p class="badge">simple init</p>
-        <h1>Your project is&nbsp;ready.</h1>
-        <p class="sub">Static site generator with edge functions. Edit <code>pages/</code> and <code>components/</code>, then reload.</p>
+        <p class="badge">vanilo init</p>
+        <h1>No framework. Just your&nbsp;site.</h1>
+        <p class="sub">HTML, components, edge functions, SQLite. No JSX, no virtual DOM, no node_modules. You know HTML? You know vanilo.</p>
     </section>
 
     <hr>
@@ -94,33 +94,33 @@ pub fn init() -> Result<(), String> {
     <section class="grid">
         <div class="card">
             <h3>Components</h3>
-            <p>Reusable HTML with props and children.</p>
-            <pre><code>&lt;Header title="simple"&gt;
+            <p>An HTML file. Props, children, nesting. That's it.</p>
+            <pre><code>&lt;Header title="vanilo"&gt;
   &lt;nav&gt;...&lt;/nav&gt;
 &lt;/Header&gt;</code></pre>
         </div>
         <div class="card">
             <h3>Client-side rendering</h3>
-            <p>Reuse components from JS. No innerHTML.</p>
-            <pre><code>Simple.list('#el', 'Card', items)
-Simple.put('#el', 'Card', item)</code></pre>
+            <p>Reuse your components from JS. Zero innerHTML.</p>
+            <pre><code>Vanilo.list('#el', 'Card', items)
+Vanilo.put('#el', 'Card', item)</code></pre>
         </div>
         <div class="card">
             <h3>Edge functions</h3>
-            <p>Server-side JS via QuickJS on /api/*.</p>
+            <p>One JS file, one handler function. API ready.</p>
             <pre><code>function handler(req) {
   return { body: "hello" }
 }</code></pre>
         </div>
         <div class="card">
             <h3>SQLite</h3>
-            <p>Built-in database in every function.</p>
+            <p>Built-in database. Nothing to install.</p>
             <pre><code>db.query("SELECT * FROM t")
 db.exec("INSERT INTO t ...")</code></pre>
         </div>
         <div class="card">
             <h3>Deploy</h3>
-            <p>Docker image, one command to ship.</p>
+            <p>Docker build, push, you're live.</p>
             <pre><code>docker build -t my-site .
 docker compose up -d</code></pre>
         </div>
@@ -130,7 +130,7 @@ docker compose up -d</code></pre>
 
     <section class="counter">
         <p>This page has been viewed <strong id="visit-count">-</strong> times</p>
-        <p class="note">Powered by <code>/api/hello</code> — an edge function backed by SQLite.</p>
+        <p class="note"><code>/api/hello</code> — edge function + SQLite. Zero config.</p>
     </section>
 </main>
 
@@ -143,7 +143,7 @@ docker compose up -d</code></pre>
     if !Path::new(&about_path).exists() {
         let about = r#"<meta name="title" content="About">
 
-<Header title="simple">
+<Header title="vanilo">
     <nav>
         <a href="/">Home</a>
         <a href="/about">About</a>
@@ -152,10 +152,10 @@ docker compose up -d</code></pre>
 
 <main>
     <div class="content">
-        <h1>About</h1>
-        <p>simple is a static site generator with edge functions, written in Rust.</p>
-        <p>Zero config, zero frontend dependencies. Write HTML and components, build your site. Add JavaScript functions for server-side logic backed by SQLite.</p>
-        <p>This page lives at <code>pages/about.html</code> and is served at <code>/about</code> — clean URLs are automatic.</p>
+        <h1>Why vanilo</h1>
+        <p>You want a website. Not a course on hooks, state management and server-side rendering for a framework that'll be deprecated in 18 months.</p>
+        <p>vanilo gives you HTML components, JS edge functions with SQLite, tree-shaken CSS, and Docker deploy. No transpiler, no bundler, no webpack config. You write HTML, you build, it's in prod.</p>
+        <p>This page is <code>pages/about.html</code>, served at <code>/about</code>. Clean URLs are automatic. No router to configure.</p>
     </div>
 </main>
 
@@ -195,8 +195,8 @@ docker compose up -d</code></pre>
     }
 
     // Config
-    if !Path::new("simple.toml").exists() {
-        let config = r#"# simple.toml — project configuration
+    if !Path::new("vanilo.toml").exists() {
+        let config = r#"# vanilo.toml — project configuration
 # Override port/host with env vars: PORT, HOST
 
 port = 3000
@@ -221,18 +221,18 @@ content_security_policy = "default-src 'self'; script-src 'self' 'unsafe-inline'
 # cross_origin_opener_policy = "same-origin"
 # cross_origin_resource_policy = "same-origin"
 "#;
-        write_file("simple.toml", config)?;
+        write_file("vanilo.toml", config)?;
     }
 
     // Dockerfile
     if !Path::new("Dockerfile").exists() {
-        let dockerfile = r#"FROM simple
+        let dockerfile = r#"FROM vanilo
 WORKDIR /app
 COPY . .
-RUN simple build
+RUN vanilo build
 EXPOSE 3000
 ENV HOST=0.0.0.0
-CMD ["simple", "serve"]
+CMD ["vanilo", "serve"]
 "#;
         write_file("Dockerfile", dockerfile)?;
     }
@@ -242,7 +242,7 @@ CMD ["simple", "serve"]
     if !Path::new(&site_json).exists() {
         let content_example = r#"{
     "title": "My Site",
-    "description": "Built with simple"
+    "description": "Built with vanilo"
 }"#;
         write_file(&site_json, content_example)?;
     }
@@ -277,11 +277,11 @@ CMD ["simple", "serve"]
     println!("  {CONTENT_DIR}/site.json");
     println!("  {STATIC_DIR}/style.css");
     println!("  {STATIC_DIR}/main.js");
-    println!("  simple.toml");
+    println!("  vanilo.toml");
     println!("  Dockerfile");
     println!("  compose.yaml");
     println!();
-    println!("run `simple serve` to start dev server");
+    println!("run `vanilo serve` to start dev server");
     Ok(())
 }
 
@@ -369,16 +369,16 @@ pub fn build() -> Result<(), String> {
     Ok(())
 }
 
-/// Returns true if any JS file in the static directory references `Simple.`,
+/// Returns true if any JS file in the static directory references `Vanilo.`,
 /// indicating the project uses the client-side rendering runtime.
 fn uses_client_runtime(static_dir: &Path) -> bool {
     if !static_dir.exists() {
         return false;
     }
-    scan_js_for_simple(static_dir)
+    scan_js_for_vanilo(static_dir)
 }
 
-fn scan_js_for_simple(dir: &Path) -> bool {
+fn scan_js_for_vanilo(dir: &Path) -> bool {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return false,
@@ -386,12 +386,12 @@ fn scan_js_for_simple(dir: &Path) -> bool {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            if scan_js_for_simple(&path) {
+            if scan_js_for_vanilo(&path) {
                 return true;
             }
         } else if path.extension().and_then(|e| e.to_str()) == Some("js") {
             if let Ok(content) = fs::read_to_string(&path) {
-                if content.contains("Simple.") {
+                if content.contains("Vanilo.") {
                     return true;
                 }
             }
@@ -1581,7 +1581,7 @@ mod tests {
         assert!(block.contains("<template id=\"tpl-Badge\">"));
         assert!(block.contains("{{title}}"));
         assert!(block.contains("{{label}}"));
-        assert!(block.contains("Simple"));
+        assert!(block.contains("Vanilo"));
     }
 
     #[test]
@@ -1635,15 +1635,15 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn detects_simple_usage_in_js() {
+    fn detects_vanilo_usage_in_js() {
         let dir = tempdir("runtime_yes");
-        fs::write(dir.join("app.js"), "Simple.list('#el', 'Card', items);").unwrap();
+        fs::write(dir.join("app.js"), "Vanilo.list('#el', 'Card', items);").unwrap();
         assert!(uses_client_runtime(&dir));
         cleanup(&dir);
     }
 
     #[test]
-    fn no_runtime_without_simple() {
+    fn no_runtime_without_vanilo() {
         let dir = tempdir("runtime_no");
         fs::write(dir.join("app.js"), "fetch('/api/hello').then(r => r.json());").unwrap();
         assert!(!uses_client_runtime(&dir));
@@ -1659,7 +1659,7 @@ mod tests {
 
     #[test]
     fn no_runtime_missing_dir() {
-        assert!(!uses_client_runtime(Path::new("/tmp/does_not_exist_simple_rt")));
+        assert!(!uses_client_runtime(Path::new("/tmp/does_not_exist_vanilo_rt")));
     }
 
     // -----------------------------------------------------------------------
@@ -1834,7 +1834,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn tempdir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("simple_test_{name}_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vanilo_test_{name}_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir

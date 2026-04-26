@@ -6,4 +6,4 @@ COPY src/ src/
 RUN cargo build --release
 
 FROM debian:bookworm-slim
-COPY --from=builder /build/target/release/simple /usr/local/bin/simple
+COPY --from=builder /build/target/release/vanilo /usr/local/bin/vanilo

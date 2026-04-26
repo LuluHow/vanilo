@@ -643,17 +643,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "703d5c7ef118737c72f1af64ad2f6f8c5e1921f818cdcb97b8fe6fc69bf66214"
 
 [[package]]
-name = "simple"
-version = "0.1.0"
-dependencies = [
- "brotli",
- "flate2",
- "rquickjs",
- "rusqlite",
- "ureq",
-]
-
-[[package]]
 name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -790,6 +779,17 @@ name = "utf8-zero"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8c0a043c9540bae7c578c88f91dda8bd82e59ae27c21baca69c8b191aaf5a6e"
+
+[[package]]
+name = "vanilo"
+version = "0.1.0"
+dependencies = [
+ "brotli",
+ "flate2",
+ "rquickjs",
+ "rusqlite",
+ "ureq",
+]
 
 [[package]]
 name = "vcpkg"

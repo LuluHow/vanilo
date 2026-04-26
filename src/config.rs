@@ -81,11 +81,11 @@ impl Config {
     }
 }
 
-/// Loads config with priority: env vars > simple.toml > defaults.
+/// Loads config with priority: env vars > vanilo.toml > defaults.
 pub fn load() -> Config {
     let mut config = Config::default();
 
-    if let Ok(content) = fs::read_to_string("simple.toml") {
+    if let Ok(content) = fs::read_to_string("vanilo.toml") {
         let v = parse_toml(&content);
 
         if let Some(port) = v.get("port").and_then(|s| s.parse().ok()) {
