@@ -15,8 +15,11 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
 use crate::builder;
+use crate::component::{self, Component};
 use crate::config::Config;
+use crate::content;
 use crate::functions;
+use crate::parser;
 
 const DIST_DIR: &str = "dist";
 const MAX_HEADERS: usize = 65536; // 64KB
@@ -51,6 +54,52 @@ fn is_blocked_extension(path: &str) -> bool {
     BLOCKED_FILENAMES.iter().any(|name| filename == *name)
 }
 
+// ---------------------------------------------------------------------------
+// Server-side rendering cache
+// ---------------------------------------------------------------------------
+
+const SERVER_CACHE_MAX: usize = 1024;
+
+struct ServerCache {
+    entries: HashMap<String, (String, Instant, u64)>,
+}
+
+impl ServerCache {
+    fn new() -> Self {
+        Self { entries: HashMap::new() }
+    }
+
+    /// Returns cached HTML if the entry exists and is not expired. Purges expired entries lazily.
+    fn get(&mut self, key: &str) -> Option<String> {
+        if let Some((html, created, ttl)) = self.entries.get(key) {
+            if created.elapsed().as_secs() < *ttl {
+                return Some(html.clone());
+            }
+            // Expired — remove
+        } else {
+            return None;
+        }
+        self.entries.remove(key);
+        None
+    }
+
+    /// Stores rendered HTML with a TTL. Evicts oldest entry if at capacity.
+    fn put(&mut self, key: String, html: String, ttl: u64) {
+        if self.entries.len() >= SERVER_CACHE_MAX {
+            // Evict oldest entry
+            if let Some(oldest_key) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (_, created, _))| *created)
+                .map(|(k, _)| k.clone())
+            {
+                self.entries.remove(&oldest_key);
+            }
+        }
+        self.entries.insert(key, (html, Instant::now(), ttl));
+    }
+}
+
 /// Ensures the active connection counter is decremented even on panic.
 struct ConnectionGuard(Arc<AtomicUsize>);
 
@@ -72,6 +121,10 @@ pub fn serve(config: Config) -> Result<(), String> {
     let webhook_rate: Arc<Mutex<(usize, Instant)>> =
         Arc::new(Mutex::new((0, Instant::now())));
     let build_lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
+    let components: Arc<HashMap<String, Component>> = Arc::new(
+        component::load_components(std::path::Path::new("components")).unwrap_or_default(),
+    );
+    let server_cache: Arc<Mutex<ServerCache>> = Arc::new(Mutex::new(ServerCache::new()));
 
     if config.webhook_path.is_some() && config.webhook_secret.is_some() {
         println!("webhook enabled on {}", config.webhook_path.as_ref().unwrap());
@@ -96,12 +149,14 @@ pub fn serve(config: Config) -> Result<(), String> {
         let cfg = config.clone();
         let wh_rate = webhook_rate.clone();
         let wh_lock = build_lock.clone();
+        let comps = components.clone();
+        let scache = server_cache.clone();
         active.fetch_add(1, Ordering::Relaxed);
         let guard = ConnectionGuard(active.clone());
 
         thread::spawn(move || {
             let _guard = guard;
-            handle_connection(&mut stream, &rate, &cfg, &wh_rate, &wh_lock);
+            handle_connection(&mut stream, &rate, &cfg, &wh_rate, &wh_lock, &comps, &scache);
         });
     }
 
@@ -114,6 +169,8 @@ fn handle_connection(
     config: &Config,
     webhook_rate: &Mutex<(usize, Instant)>,
     build_lock: &Arc<Mutex<()>>,
+    components: &HashMap<String, Component>,
+    server_cache: &Mutex<ServerCache>,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
@@ -396,39 +453,301 @@ fn handle_connection(
         let file_path = decoded_path.split('?').next().unwrap_or(&decoded_path);
         let accept_br = accepts_encoding(&headers_str, "br");
         let accept_gz = accepts_encoding(&headers_str, "gzip");
-        let (status, body, content_type, encoding) =
-            resolve_file(file_path, accept_br, accept_gz);
-        let cache = cache_control_for(file_path, content_type);
 
-        // ETag based on served content
-        let etag = compute_etag(&body);
+        // For HTML pages, check if they contain <Server> blocks requiring SSR.
+        // Read the raw (uncompressed) file first to check for markers.
+        let (status, raw_body) = resolve_file_raw(file_path);
+        let content_type = content_type_for_path(file_path);
+        let is_html = content_type.starts_with("text/html");
+        let has_server_blocks = is_html
+            && status == "200 OK"
+            && raw_body.as_ref().is_ok_and(|b| {
+                std::str::from_utf8(b)
+                    .is_ok_and(|s| s.contains(SERVER_MARKER_START))
+            });
 
-        // 304 Not Modified
-        let if_none_match = extract_header(&headers_str, "if-none-match");
-        if status == "200 OK" && if_none_match.as_deref() == Some(etag.as_str()) {
+        if has_server_blocks {
+            // Dynamic page: process server blocks, compress on-the-fly
+            let raw_bytes = raw_body.unwrap();
+            let html_str = String::from_utf8_lossy(&raw_bytes);
+            let assembled = process_server_blocks(&html_str, components, server_cache, config);
+            let assembled_bytes = assembled.as_bytes();
+
+            let etag = compute_etag(assembled_bytes);
+            let if_none_match = extract_header(&headers_str, "if-none-match");
+            if if_none_match.as_deref() == Some(etag.as_str()) {
+                let response = format!(
+                    "HTTP/1.1 304 Not Modified\r\nETag: {etag}\r\n{sec}Cache-Control: no-cache\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(response.as_bytes());
+                return;
+            }
+
+            // On-the-fly compression
+            let (body_bytes, encoding): (Vec<u8>, Option<&str>) =
+                if accept_br && assembled_bytes.len() > 256 {
+                    (brotli_compress_fast(assembled_bytes), Some("br"))
+                } else if accept_gz && assembled_bytes.len() > 256 {
+                    (gzip_compress(assembled_bytes), Some("gzip"))
+                } else {
+                    (assembled_bytes.to_vec(), None)
+                };
+
+            let mut extra = String::new();
+            if let Some(enc) = encoding {
+                extra.push_str(&format!(
+                    "Content-Encoding: {enc}\r\nVary: Accept-Encoding\r\n"
+                ));
+            }
+
             let response = format!(
-                "HTTP/1.1 304 Not Modified\r\nETag: {etag}\r\n{sec}Cache-Control: {cache}\r\nConnection: close\r\n\r\n"
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nETag: {etag}\r\n{extra}{sec}Cache-Control: no-cache\r\nConnection: close\r\n\r\n",
+                body_bytes.len()
             );
             let _ = stream.write_all(response.as_bytes());
-            return;
-        }
+            if method != "HEAD" {
+                let _ = stream.write_all(&body_bytes);
+            }
+        } else {
+            // Pure static page: serve normally with pre-compressed variants
+            let (status, body, content_type, encoding) =
+                resolve_file(file_path, accept_br, accept_gz);
+            let cache = cache_control_for(file_path, content_type);
 
-        let mut extra = String::new();
-        if let Some(enc) = encoding {
-            extra.push_str(&format!(
-                "Content-Encoding: {enc}\r\nVary: Accept-Encoding\r\n"
-            ));
-        }
+            let etag = compute_etag(&body);
+            let if_none_match = extract_header(&headers_str, "if-none-match");
+            if status == "200 OK" && if_none_match.as_deref() == Some(etag.as_str()) {
+                let response = format!(
+                    "HTTP/1.1 304 Not Modified\r\nETag: {etag}\r\n{sec}Cache-Control: {cache}\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(response.as_bytes());
+                return;
+            }
 
-        let response = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nETag: {etag}\r\n{extra}{sec}Cache-Control: {cache}\r\nConnection: close\r\n\r\n",
-            body.len()
-        );
-        let _ = stream.write_all(response.as_bytes());
-        if method != "HEAD" {
-            let _ = stream.write_all(&body);
+            let mut extra = String::new();
+            if let Some(enc) = encoding {
+                extra.push_str(&format!(
+                    "Content-Encoding: {enc}\r\nVary: Accept-Encoding\r\n"
+                ));
+            }
+
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nETag: {etag}\r\n{extra}{sec}Cache-Control: {cache}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            if method != "HEAD" {
+                let _ = stream.write_all(&body);
+            }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Server-side rendering of <Server> blocks
+// ---------------------------------------------------------------------------
+
+const SERVER_MARKER_START: &str = "<!--vanilo:server ";
+const SERVER_MARKER_END: &str = "-->";
+
+/// Processes `<!--vanilo:server ...-->` markers in the HTML, executing edge functions
+/// and rendering components at request time.
+fn process_server_blocks(
+    html: &str,
+    components: &HashMap<String, Component>,
+    cache: &Mutex<ServerCache>,
+    config: &Config,
+) -> String {
+    let mut result = String::with_capacity(html.len());
+    let mut remaining = html;
+
+    while let Some(start) = remaining.find(SERVER_MARKER_START) {
+        result.push_str(&remaining[..start]);
+        remaining = &remaining[start..];
+
+        let end = match remaining.find(SERVER_MARKER_END) {
+            Some(p) => p + SERVER_MARKER_END.len(),
+            None => {
+                result.push_str(SERVER_MARKER_START);
+                remaining = &remaining[SERVER_MARKER_START.len()..];
+                continue;
+            }
+        };
+
+        let marker = &remaining[..end];
+        remaining = &remaining[end..];
+
+        let rendered = match parse_server_marker(marker) {
+            Some((fn_name, comp_name, ttl, params)) => {
+                render_server_block(&fn_name, &comp_name, ttl, &params, components, cache, config)
+            }
+            None => {
+                eprintln!("server block: malformed marker: {marker}");
+                String::new()
+            }
+        };
+        result.push_str(&rendered);
+    }
+
+    result.push_str(remaining);
+    result
+}
+
+/// Parses a `<!--vanilo:server fn="X" comp="Y" [cache="N"] [params="..."]-->` marker.
+/// Returns (function_name, component_name, optional_cache_ttl, params_query).
+fn parse_server_marker(marker: &str) -> Option<(String, String, Option<u64>, String)> {
+    let inner = marker
+        .strip_prefix("<!--vanilo:server ")?
+        .strip_suffix("-->")?
+        .trim();
+
+    let mut fn_name = None;
+    let mut comp_name = None;
+    let mut cache_ttl = None;
+    let mut params = String::new();
+
+    let mut rem = inner;
+    while !rem.is_empty() {
+        rem = rem.trim_start();
+        if rem.is_empty() {
+            break;
+        }
+
+        let eq_pos = rem.find('=')?;
+        let attr = rem[..eq_pos].trim();
+        rem = &rem[eq_pos + 1..];
+
+        // Parse quoted value
+        let quote = rem.chars().next()?;
+        if quote != '"' && quote != '\'' {
+            return None;
+        }
+        rem = &rem[1..];
+        let close = rem.find(quote)?;
+        let val = &rem[..close];
+        rem = &rem[close + 1..];
+
+        match attr {
+            "fn" => fn_name = Some(val.to_string()),
+            "comp" => comp_name = Some(val.to_string()),
+            "cache" => cache_ttl = val.parse::<u64>().ok(),
+            "params" => params = val.to_string(),
+            _ => {}
+        }
+    }
+
+    Some((fn_name?, comp_name?, cache_ttl, params))
+}
+
+/// Renders a single server block: cache check → execute function → render components.
+fn render_server_block(
+    fn_name: &str,
+    comp_name: &str,
+    ttl: Option<u64>,
+    params: &str,
+    components: &HashMap<String, Component>,
+    cache: &Mutex<ServerCache>,
+    config: &Config,
+) -> String {
+    let cache_key = format!("{fn_name}:{comp_name}:{params}");
+    let start = Instant::now();
+
+    // Cache check
+    if ttl.is_some() {
+        if let Ok(mut c) = cache.lock() {
+            if let Some(html) = c.get(&cache_key) {
+                return html;
+            }
+        }
+    }
+
+    // Resolve and execute the edge function
+    let api_path = format!("/api/{fn_name}");
+    let file_path = match functions::resolve_function(&api_path) {
+        Some(p) => p,
+        None => {
+            eprintln!("server block: function not found: {fn_name}");
+            return String::new();
+        }
+    };
+
+    let req = functions::FnRequest {
+        method: "GET".to_string(),
+        path: api_path,
+        body: String::new(),
+        query: params.to_string(),
+        headers: HashMap::new(),
+    };
+
+    let response = match functions::execute(&file_path, &req, config) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("server block: function {fn_name} failed: {e}");
+            return String::new();
+        }
+    };
+
+    if response.status >= 400 {
+        eprintln!("server block: function {fn_name} returned status {}", response.status);
+        return String::new();
+    }
+
+    // Parse JSON response
+    let value = match content::parse_json(&response.body) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("server block: invalid JSON from {fn_name}: {e}");
+            return String::new();
+        }
+    };
+
+    // Get component template
+    let template = match components.get(comp_name) {
+        Some(c) => &c.template,
+        None => {
+            eprintln!("server block: component not found: {comp_name}");
+            return String::new();
+        }
+    };
+
+    // Collect items: array → iterate, object → single item
+    let items: Vec<&content::Value> = match &value {
+        content::Value::Array(arr) => arr.iter().collect(),
+        content::Value::Object(_) => vec![&value],
+        _ => Vec::new(),
+    };
+
+    // Render component for each item
+    let mut html = String::new();
+    for item in &items {
+        if let content::Value::Object(pairs) = item {
+            let props: HashMap<String, String> = pairs
+                .iter()
+                .map(|(k, v)| (k.clone(), v.as_str()))
+                .collect();
+            let rendered = component::render(template, &props, "");
+            // Resolve nested component tags in the rendered output
+            let resolved = parser::resolve(&rendered, components);
+            html.push_str(&resolved);
+        }
+    }
+
+    // Store in cache if TTL is set
+    if let Some(ttl_secs) = ttl {
+        if let Ok(mut c) = cache.lock() {
+            c.put(cache_key, html.clone(), ttl_secs);
+        }
+    }
+
+    let elapsed = start.elapsed();
+    if elapsed.as_millis() > 1000 {
+        eprintln!(
+            "server block: {fn_name}/{comp_name} took {}ms",
+            elapsed.as_millis()
+        );
+    }
+
+    html
 }
 
 /// Handles an /api/* request by executing the matching JS function.
@@ -551,6 +870,56 @@ fn resolve_file(
     }
 
     ("404 Not Found", b"404 not found".to_vec(), "text/plain", None)
+}
+
+/// Resolves a URL path to the raw (uncompressed) file in dist/.
+/// Used for HTML pages that may contain <Server> blocks requiring SSR.
+fn resolve_file_raw(url_path: &str) -> (&'static str, Result<Vec<u8>, ()>) {
+    let clean = url_path.trim_start_matches('/');
+
+    if is_blocked_extension(clean) {
+        return ("403 Forbidden", Err(()));
+    }
+
+    let base = PathBuf::from(DIST_DIR);
+    let candidates = if clean.is_empty() {
+        vec![base.join("index.html")]
+    } else {
+        vec![base.join(clean), base.join(clean).join("index.html")]
+    };
+
+    let base_canonical = match base.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return ("404 Not Found", Err(())),
+    };
+
+    for candidate in &candidates {
+        if candidate.is_file() {
+            if let Ok(canonical) = candidate.canonicalize() {
+                if !canonical.starts_with(&base_canonical) {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+            match fs::read(candidate) {
+                Ok(body) => return ("200 OK", Ok(body)),
+                Err(_) => continue,
+            }
+        }
+    }
+
+    ("404 Not Found", Err(()))
+}
+
+/// Returns the content type for a URL path (without reading the file).
+/// Clean URLs (no extension) resolve to HTML.
+fn content_type_for_path(url_path: &str) -> &'static str {
+    let clean = url_path.trim_start_matches('/');
+    if clean.is_empty() || clean.ends_with('/') || !clean.contains('.') {
+        return "text/html; charset=utf-8";
+    }
+    content_type(clean)
 }
 
 fn content_type(path: &str) -> &'static str {
@@ -1157,5 +1526,181 @@ mod tests {
         let headers = parse_request_headers(raw);
         assert!(headers.get("x-request-id").is_some());
         assert!(headers.get("accept").is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // Server block marker parsing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_marker_basic() {
+        let marker = r#"<!--vanilo:server fn="articles" comp="Card"-->"#;
+        let (f, c, ttl, params) = parse_server_marker(marker).unwrap();
+        assert_eq!(f, "articles");
+        assert_eq!(c, "Card");
+        assert!(ttl.is_none());
+        assert_eq!(params, "");
+    }
+
+    #[test]
+    fn parse_marker_with_cache() {
+        let marker = r#"<!--vanilo:server fn="articles" comp="Card" cache="3600"-->"#;
+        let (f, c, ttl, params) = parse_server_marker(marker).unwrap();
+        assert_eq!(f, "articles");
+        assert_eq!(c, "Card");
+        assert_eq!(ttl, Some(3600));
+        assert_eq!(params, "");
+    }
+
+    #[test]
+    fn parse_marker_with_params() {
+        let marker = r#"<!--vanilo:server fn="articles" comp="Card" params="category=rust&limit=10"-->"#;
+        let (f, c, ttl, params) = parse_server_marker(marker).unwrap();
+        assert_eq!(f, "articles");
+        assert_eq!(c, "Card");
+        assert!(ttl.is_none());
+        assert_eq!(params, "category=rust&limit=10");
+    }
+
+    #[test]
+    fn parse_marker_with_all() {
+        let marker = r#"<!--vanilo:server fn="articles" comp="Card" cache="60" params="category=rust"-->"#;
+        let (f, c, ttl, params) = parse_server_marker(marker).unwrap();
+        assert_eq!(f, "articles");
+        assert_eq!(c, "Card");
+        assert_eq!(ttl, Some(60));
+        assert_eq!(params, "category=rust");
+    }
+
+    #[test]
+    fn parse_marker_invalid() {
+        assert!(parse_server_marker("<!-- not a server marker -->").is_none());
+        assert!(parse_server_marker("random text").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // ServerCache
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cache_put_and_get() {
+        let mut cache = ServerCache::new();
+        cache.put("key".into(), "<div>cached</div>".into(), 60);
+        assert_eq!(cache.get("key"), Some("<div>cached</div>".into()));
+    }
+
+    #[test]
+    fn cache_miss() {
+        let mut cache = ServerCache::new();
+        assert_eq!(cache.get("missing"), None);
+    }
+
+    #[test]
+    fn cache_evicts_at_capacity() {
+        let mut cache = ServerCache::new();
+        for i in 0..SERVER_CACHE_MAX + 5 {
+            cache.put(format!("k{i}"), format!("v{i}"), 3600);
+        }
+        assert!(cache.entries.len() <= SERVER_CACHE_MAX);
+    }
+
+    // -----------------------------------------------------------------------
+    // Content type for clean URLs
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn clean_url_is_html() {
+        assert!(content_type_for_path("/blog").starts_with("text/html"));
+        assert!(content_type_for_path("/about").starts_with("text/html"));
+        assert!(content_type_for_path("/").starts_with("text/html"));
+    }
+
+    #[test]
+    fn file_url_keeps_type() {
+        assert_eq!(content_type_for_path("/style.css"), "text/css");
+        assert_eq!(content_type_for_path("/main.js"), "application/javascript");
+    }
+
+    // -----------------------------------------------------------------------
+    // Component rendering with parsed JSON (integration)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn render_components_from_json_array() {
+        // Simulate what process_server_blocks does:
+        // 1. Parse JSON from function response
+        // 2. Render component for each item
+
+        let json_str = r#"[{"title":"Hello World","description":"First post"},{"title":"Server Blocks","description":"SSR for Vanilo"}]"#;
+        let value = content::parse_json(json_str).unwrap();
+
+        let template = "<div class=\"card\">\n    <h3>{{title}}</h3>\n    <p>{{description}}</p>\n</div>";
+
+        let items: Vec<&content::Value> = match &value {
+            content::Value::Array(arr) => arr.iter().collect(),
+            content::Value::Object(_) => vec![&value],
+            _ => Vec::new(),
+        };
+
+        assert_eq!(items.len(), 2);
+
+        let mut html = String::new();
+        for item in &items {
+            if let content::Value::Object(pairs) = item {
+                let props: HashMap<String, String> = pairs
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.as_str()))
+                    .collect();
+                assert!(props.contains_key("title"), "props missing 'title': {:?}", props);
+                assert!(props.contains_key("description"), "props missing 'description': {:?}", props);
+                let rendered = component::render(template, &props, "");
+                html.push_str(&rendered);
+            }
+        }
+
+        assert!(html.contains("<h3>Hello World</h3>"), "rendered HTML: {html}");
+        assert!(html.contains("<h3>Server Blocks</h3>"), "rendered HTML: {html}");
+        assert!(html.contains("<p>First post</p>"), "rendered HTML: {html}");
+        assert!(html.contains("<p>SSR for Vanilo</p>"), "rendered HTML: {html}");
+    }
+
+    #[test]
+    fn render_single_object_from_json() {
+        let json_str = r#"{"title":"Solo","description":"Single object"}"#;
+        let value = content::parse_json(json_str).unwrap();
+
+        let template = "<div><h3>{{title}}</h3></div>";
+
+        let items: Vec<&content::Value> = match &value {
+            content::Value::Array(arr) => arr.iter().collect(),
+            content::Value::Object(_) => vec![&value],
+            _ => Vec::new(),
+        };
+
+        assert_eq!(items.len(), 1);
+
+        if let content::Value::Object(pairs) = items[0] {
+            let props: HashMap<String, String> = pairs
+                .iter()
+                .map(|(k, v)| (k.clone(), v.as_str()))
+                .collect();
+            let rendered = component::render(template, &props, "");
+            assert!(rendered.contains("<h3>Solo</h3>"), "rendered: {rendered}");
+        } else {
+            panic!("expected object");
+        }
+    }
+
+    #[test]
+    fn render_empty_array_produces_nothing() {
+        let json_str = "[]";
+        let value = content::parse_json(json_str).unwrap();
+
+        let items: Vec<&content::Value> = match &value {
+            content::Value::Array(arr) => arr.iter().collect(),
+            _ => Vec::new(),
+        };
+
+        assert_eq!(items.len(), 0);
     }
 }

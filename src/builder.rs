@@ -714,6 +714,9 @@ fn process_dir(
         // Resolve {{@...}} content placeholders (before components, so they work as props)
         let body = content::resolve_placeholders(&body, content_data);
 
+        // Replace <Server .../> tags with comment markers for runtime SSR
+        let body = replace_server_blocks(&body);
+
         // Resolve components in page body
         let resolved = parser::resolve(&body, components);
 
@@ -823,6 +826,92 @@ fn parse_quoted_value(input: &str) -> Option<(String, &str)> {
     let end = rest.find(quote)?;
     let value = rest[..end].to_string();
     Some((value, &rest[end + 1..]))
+}
+
+// ---------------------------------------------------------------------------
+// <Server> block replacement
+// ---------------------------------------------------------------------------
+
+/// Replaces `<Server ... />` tags with `<!--vanilo:server ...-->` comment markers.
+///
+/// Reserved attributes: `function`, `component`, `cache`.
+/// All other attributes become query-string params passed to the function at runtime.
+fn replace_server_blocks(html: &str) -> String {
+    let mut result = String::with_capacity(html.len());
+    let mut remaining = html;
+
+    while let Some(start) = remaining.find("<Server ") {
+        result.push_str(&remaining[..start]);
+        remaining = &remaining[start..];
+
+        if let Some((marker, after)) = parse_server_tag(remaining) {
+            result.push_str(&marker);
+            remaining = after;
+        } else {
+            // Malformed tag — emit as-is and skip past "<Server "
+            result.push_str("<Server ");
+            remaining = &remaining[8..];
+        }
+    }
+
+    result.push_str(remaining);
+    result
+}
+
+/// Parses a `<Server ... />` tag and returns the comment marker + remaining input.
+fn parse_server_tag(input: &str) -> Option<(String, &str)> {
+    // Find the self-closing end
+    let end = input.find("/>")?;
+    let tag_body = &input[8..end]; // skip "<Server "
+    let after = &input[end + 2..];
+
+    let mut function = None;
+    let mut component = None;
+    let mut cache = None;
+    let mut params: Vec<(String, String)> = Vec::new();
+
+    let mut rem = tag_body;
+    while !rem.is_empty() {
+        rem = rem.trim_start();
+        if rem.is_empty() {
+            break;
+        }
+
+        // Extract attribute name
+        let eq_pos = match rem.find('=') {
+            Some(p) => p,
+            None => break,
+        };
+        let attr_name = rem[..eq_pos].trim();
+        rem = &rem[eq_pos + 1..];
+
+        // Extract quoted value
+        let (val, rest) = parse_quoted_value(rem)?;
+        rem = rest;
+
+        match attr_name {
+            "function" => function = Some(val),
+            "component" => component = Some(val),
+            "cache" => cache = Some(val),
+            _ => params.push((attr_name.to_string(), val)),
+        }
+    }
+
+    let function = function?;
+    let component = component?;
+
+    let mut marker = format!("<!--vanilo:server fn=\"{function}\" comp=\"{component}\"");
+    if let Some(ttl) = cache {
+        marker.push_str(&format!(" cache=\"{ttl}\""));
+    }
+    if !params.is_empty() {
+        params.sort_by(|a, b| a.0.cmp(&b.0));
+        let qs: Vec<String> = params.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        marker.push_str(&format!(" params=\"{}\"", qs.join("&")));
+    }
+    marker.push_str("-->");
+
+    Some((marker, after))
 }
 
 /// File extensions that must never be copied to dist/ or served.
@@ -1432,11 +1521,15 @@ fn find_preserved_block(html: &str) -> Option<PreservedBlock> {
 }
 
 fn collapse_whitespace(html: &str, out: &mut String) {
-    // Strip HTML comments
+    // Strip HTML comments (preserve <!--vanilo:server markers for runtime SSR)
     let mut remaining = html;
     while let Some(start) = remaining.find("<!--") {
         out.push_str(&collapse_inter_tag(&remaining[..start]));
         if let Some(end) = remaining[start..].find("-->") {
+            let comment = &remaining[start..start + end + 3];
+            if comment.starts_with("<!--vanilo:server") {
+                out.push_str(comment);
+            }
             remaining = &remaining[start + end + 3..];
         } else {
             remaining = "";
@@ -2098,5 +2191,91 @@ mod tests {
         let filename = url.rsplit('/').next().unwrap();
         let parts: Vec<&str> = filename.split('.').collect();
         parts[parts.len() - 2].to_string()
+    }
+
+    // -----------------------------------------------------------------------
+    // Server block replacement
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn server_block_basic() {
+        let input = r#"<h1>Blog</h1><Server function="articles" component="Card" /><p>end</p>"#;
+        let result = replace_server_blocks(input);
+        assert_eq!(
+            result,
+            r#"<h1>Blog</h1><!--vanilo:server fn="articles" comp="Card"--><p>end</p>"#
+        );
+    }
+
+    #[test]
+    fn server_block_with_cache() {
+        let input = r#"<Server function="articles" component="Card" cache="3600" />"#;
+        let result = replace_server_blocks(input);
+        assert_eq!(
+            result,
+            r#"<!--vanilo:server fn="articles" comp="Card" cache="3600"-->"#
+        );
+    }
+
+    #[test]
+    fn server_block_with_params() {
+        let input = r#"<Server function="articles" component="Card" category="rust" limit="10" />"#;
+        let result = replace_server_blocks(input);
+        assert_eq!(
+            result,
+            r#"<!--vanilo:server fn="articles" comp="Card" params="category=rust&limit=10"-->"#
+        );
+    }
+
+    #[test]
+    fn server_block_params_sorted() {
+        // z comes after a, so params should be sorted: a=1&z=2
+        let input = r#"<Server function="f" component="C" z="2" a="1" />"#;
+        let result = replace_server_blocks(input);
+        assert!(result.contains(r#"params="a=1&z=2""#));
+    }
+
+    #[test]
+    fn server_block_with_cache_and_params() {
+        let input = r#"<Server function="articles" component="Card" cache="60" category="rust" />"#;
+        let result = replace_server_blocks(input);
+        assert_eq!(
+            result,
+            r#"<!--vanilo:server fn="articles" comp="Card" cache="60" params="category=rust"-->"#
+        );
+    }
+
+    #[test]
+    fn server_block_passthrough_no_match() {
+        let input = "<h1>No server blocks here</h1>";
+        let result = replace_server_blocks(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn server_block_multiple() {
+        let input = r#"<Server function="a" component="A" /><p>mid</p><Server function="b" component="B" />"#;
+        let result = replace_server_blocks(input);
+        assert!(result.contains(r#"<!--vanilo:server fn="a" comp="A"-->"#));
+        assert!(result.contains(r#"<!--vanilo:server fn="b" comp="B"-->"#));
+        assert!(result.contains("<p>mid</p>"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Minifier preserves server markers
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn minify_preserves_server_marker() {
+        let input = r#"<h1>Blog</h1> <!--vanilo:server fn="articles" comp="Card"--> <p>end</p>"#;
+        let result = minify_html(input);
+        assert!(result.contains(r#"<!--vanilo:server fn="articles" comp="Card"-->"#));
+    }
+
+    #[test]
+    fn minify_strips_regular_comments() {
+        let input = "<h1>Blog</h1> <!-- regular comment --> <p>end</p>";
+        let result = minify_html(input);
+        assert!(!result.contains("regular comment"));
     }
 }
