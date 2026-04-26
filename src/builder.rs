@@ -16,6 +16,15 @@ const FUNCTIONS_DIR: &str = "functions";
 const DIST_DIR: &str = "dist";
 const LAYOUT_FILE: &str = "layout.html";
 
+/// Minimal client-side runtime for rendering components from <template> elements.
+const TEMPLATES_RUNTIME: &str = r#"<script>(function(){
+var S=window.Simple={};
+S.esc=function(s){var d=document.createElement("div");d.appendChild(document.createTextNode(s));return d.innerHTML};
+S.render=function(n,p){var t=document.getElementById("tpl-"+n);if(!t)return"";var h=t.innerHTML;if(p){var k=Object.keys(p);for(var i=0;i<k.length;i++){var v=p[k[i]]!=null?String(p[k[i]]):"";h=h.split("{{"+k[i]+"}}").join(S.esc(v))}}return h.replace(/\{\{[^}]+\}\}/g,"")};
+S.put=function(sel,n,p){var el=typeof sel==="string"?document.querySelector(sel):sel;if(el)el.innerHTML=S.render(n,p)};
+S.list=function(sel,n,arr){var el=typeof sel==="string"?document.querySelector(sel):sel;if(!el||!arr)return;el.innerHTML=arr.map(function(p){return S.render(n,p)}).join("")};
+})();</script>"#;
+
 /// Scaffolds a new project structure.
 pub fn init() -> Result<(), String> {
     create_dir(PAGES_DIR)?;
@@ -85,6 +94,12 @@ pub fn init() -> Result<(), String> {
             <pre><code>&lt;Header title="simple"&gt;
   &lt;nav&gt;...&lt;/nav&gt;
 &lt;/Header&gt;</code></pre>
+        </div>
+        <div class="card">
+            <h3>Client-side rendering</h3>
+            <p>Reuse components from JS. No innerHTML.</p>
+            <pre><code>Simple.list('#el', 'Card', items)
+Simple.put('#el', 'Card', item)</code></pre>
         </div>
         <div class="card">
             <h3>Edge functions</h3>
@@ -281,13 +296,16 @@ pub fn build() -> Result<(), String> {
         Path::new(FUNCTIONS_DIR),
     )?;
 
+    // Build component templates block for runtime JS rendering
+    let templates_block = build_templates_block(&components);
+
     // Process pages
     let pages_path = Path::new(PAGES_DIR);
     if !pages_path.exists() {
         return Err(format!("{PAGES_DIR}/ directory not found"));
     }
 
-    let page_count = process_dir(pages_path, pages_path, Path::new(DIST_DIR), &components, &layout)?;
+    let page_count = process_dir(pages_path, pages_path, Path::new(DIST_DIR), &components, &layout, &templates_block)?;
     println!("built {page_count} page(s)");
 
     // Copy static files
@@ -314,6 +332,50 @@ pub fn build() -> Result<(), String> {
     Ok(())
 }
 
+/// Builds `<template>` elements for all components + the runtime script.
+/// Injected before `</body>` so components are reusable from client-side JS.
+fn build_templates_block(
+    components: &std::collections::HashMap<String, component::Component>,
+) -> String {
+    if components.is_empty() {
+        return String::new();
+    }
+
+    let mut block = String::new();
+
+    // Sort for deterministic output
+    let mut names: Vec<&String> = components.keys().collect();
+    names.sort();
+
+    for name in &names {
+        let comp = &components[*name];
+        block.push_str("<template id=\"tpl-");
+        block.push_str(name);
+        block.push_str("\">");
+        block.push_str(comp.template.trim());
+        block.push_str("</template>");
+    }
+
+    block.push_str(TEMPLATES_RUNTIME);
+    block
+}
+
+/// Inserts content just before `</body>`, or appends if no `</body>` found.
+fn inject_before_body_close(html: &str, content: &str) -> String {
+    if content.is_empty() {
+        return html.to_string();
+    }
+    if let Some(pos) = html.rfind("</body>") {
+        let mut result = String::with_capacity(html.len() + content.len());
+        result.push_str(&html[..pos]);
+        result.push_str(content);
+        result.push_str(&html[pos..]);
+        result
+    } else {
+        format!("{html}{content}")
+    }
+}
+
 /// Recursively processes a directory of pages.
 fn process_dir(
     dir: &Path,
@@ -321,6 +383,7 @@ fn process_dir(
     dist_root: &Path,
     components: &std::collections::HashMap<String, component::Component>,
     layout: &Option<String>,
+    templates_block: &str,
 ) -> Result<usize, String> {
     let mut count = 0;
     let entries = fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))?;
@@ -330,7 +393,7 @@ fn process_dir(
         let path = entry.path();
 
         if path.is_dir() {
-            count += process_dir(&path, pages_root, dist_root, components, layout)?;
+            count += process_dir(&path, pages_root, dist_root, components, layout, templates_block)?;
             continue;
         }
 
@@ -353,6 +416,9 @@ fn process_dir(
         } else {
             resolved
         };
+
+        // Inject component templates for runtime JS rendering
+        let final_html = inject_before_body_close(&final_html, templates_block);
 
         // Compute output path with clean URLs:
         // about.html -> about/index.html (served as /about/)
@@ -748,7 +814,7 @@ struct PreservedBlock {
 }
 
 fn find_preserved_block(html: &str) -> Option<PreservedBlock> {
-    let tags = ["<pre", "<code", "<script", "<style", "<textarea"];
+    let tags = ["<pre", "<code", "<script", "<style", "<textarea", "<template"];
     let mut earliest: Option<(usize, &str)> = None;
 
     for tag in &tags {
@@ -1129,6 +1195,79 @@ mod tests {
         assert!(!is_blocked_file("main.js"));
         assert!(!is_blocked_file("photo.png"));
         assert!(!is_blocked_file("index.html"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Component templates + runtime
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn templates_block_contains_all_components() {
+        let mut comps = std::collections::HashMap::new();
+        comps.insert(
+            "Card".to_string(),
+            component::Component {
+                template: "<div class=\"card\">{{title}}</div>".to_string(),
+            },
+        );
+        comps.insert(
+            "Badge".to_string(),
+            component::Component {
+                template: "<span>{{label}}</span>".to_string(),
+            },
+        );
+        let block = build_templates_block(&comps);
+        assert!(block.contains("<template id=\"tpl-Card\">"));
+        assert!(block.contains("<template id=\"tpl-Badge\">"));
+        assert!(block.contains("{{title}}"));
+        assert!(block.contains("{{label}}"));
+        assert!(block.contains("Simple"));
+    }
+
+    #[test]
+    fn templates_block_empty_when_no_components() {
+        let comps = std::collections::HashMap::new();
+        let block = build_templates_block(&comps);
+        assert!(block.is_empty());
+    }
+
+    #[test]
+    fn templates_block_sorted_deterministic() {
+        let mut comps = std::collections::HashMap::new();
+        comps.insert("Zebra".to_string(), component::Component { template: "<z></z>".to_string() });
+        comps.insert("Alpha".to_string(), component::Component { template: "<a></a>".to_string() });
+        let block = build_templates_block(&comps);
+        let alpha_pos = block.find("tpl-Alpha").unwrap();
+        let zebra_pos = block.find("tpl-Zebra").unwrap();
+        assert!(alpha_pos < zebra_pos, "components should be sorted alphabetically");
+    }
+
+    #[test]
+    fn inject_before_body() {
+        let html = "<html><body><p>hi</p></body></html>";
+        let result = inject_before_body_close(html, "<template>x</template>");
+        assert_eq!(result, "<html><body><p>hi</p><template>x</template></body></html>");
+    }
+
+    #[test]
+    fn inject_appends_without_body() {
+        let html = "<div>no body tag</div>";
+        let result = inject_before_body_close(html, "<template>x</template>");
+        assert_eq!(result, "<div>no body tag</div><template>x</template>");
+    }
+
+    #[test]
+    fn inject_noop_when_empty() {
+        let html = "<html><body></body></html>";
+        let result = inject_before_body_close(html, "");
+        assert_eq!(result, html);
+    }
+
+    #[test]
+    fn minify_preserves_template_content() {
+        let input = "<template id=\"tpl-Card\"><div>  {{title}}  </div></template>";
+        let result = minify_html(input);
+        assert!(result.contains("  {{title}}  "), "template content should be preserved");
     }
 
     // -----------------------------------------------------------------------

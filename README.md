@@ -117,6 +117,49 @@ Components without children can be self-closed:
 
 Components can contain other components. Resolution is recursive.
 
+### Client-side rendering
+
+At build time, every component is also emitted as a native `<template>` element in the HTML. A minimal runtime (`Simple`) lets you reuse components from JavaScript — no markup duplication, no `innerHTML` string concatenation.
+
+**Render a list:**
+
+```javascript
+fetch('/api/messages').then(r => r.json()).then(function(messages) {
+    Simple.list('#messages-list', 'MessageCard', messages);
+});
+```
+
+**Render a single item:**
+
+```javascript
+Simple.put('#user-profile', 'UserCard', user);
+```
+
+**Get the HTML string (advanced):**
+
+```javascript
+var html = Simple.render('MessageCard', { author: "Alice", content: "Hello" });
+```
+
+**API:**
+
+| Method | Description |
+|--------|-------------|
+| `Simple.list(selector, component, array)` | Render an array of items into a container |
+| `Simple.put(selector, component, data)` | Render a single item into a container |
+| `Simple.render(component, data)` | Return the HTML string (no DOM insertion) |
+| `Simple.esc(string)` | HTML-escape a string |
+
+All prop values are automatically HTML-escaped. Unreplaced `{{prop}}` placeholders are removed.
+
+**Conditions** are plain JavaScript:
+
+```javascript
+if (user) Simple.put('#welcome', 'Welcome', user);
+
+Simple.put('#status', user.premium ? 'PremiumBadge' : 'FreeBadge', user);
+```
+
 ## Layout
 
 `layout.html` wraps all pages. Each page's content is inserted before `</body>`.
