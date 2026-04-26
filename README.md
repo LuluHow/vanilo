@@ -39,6 +39,9 @@ my-site/
   components/            # reusable components
     Header.html
     Card.html
+  content/               # JSON content (CMS)
+    site.json
+    posts.json
   static/                # copied as-is into dist/
     style.css
     main.js
@@ -191,6 +194,86 @@ Any `<meta name="...">` tag in a page becomes a prop available in the layout.
 
 `about.html` is built as `about/index.html` and served at `/about`.
 
+## Content (CMS)
+
+JSON files in `content/` act as a lightweight CMS. Edit them directly on GitHub &mdash; push triggers a rebuild, site updates.
+
+### Values
+
+Create a JSON file:
+
+```json
+// content/site.json
+{
+    "title": "My Site",
+    "description": "Built with simple",
+    "contact": {
+        "email": "hello@example.com"
+    }
+}
+```
+
+Reference values in any page or layout with `{{@file.key}}`:
+
+```html
+<h1>{{@site.title}}</h1>
+<p>{{@site.description}}</p>
+<a href="mailto:{{@site.contact.email}}">Contact</a>
+```
+
+Nested paths work: `{{@site.contact.email}}` navigates `site.json` &rarr; `contact` &rarr; `email`.
+
+Content references also work as component props:
+
+```html
+<Header title="{{@site.title}}" />
+```
+
+Unresolved references are removed silently.
+
+### Collections
+
+Use `<Each>` to iterate over a JSON array:
+
+```json
+// content/posts.json
+[
+    { "title": "First post", "slug": "first-post", "description": "Hello world" },
+    { "title": "Second post", "slug": "second-post", "description": "Another one" }
+]
+```
+
+```html
+<Each content="posts">
+    <article>
+        <h2><a href="/blog/{{slug}}">{{title}}</a></h2>
+        <p>{{description}}</p>
+    </article>
+</Each>
+```
+
+Inside `<Each>`, `{{key}}` is replaced with each item's properties. Unmatched placeholders pass through to the component system, so you can combine both:
+
+```html
+<Each content="posts">
+    <Card title="{{title}}" href="/blog/{{slug}}" />
+</Each>
+```
+
+`<Each>` also supports nested paths for arrays inside objects:
+
+```html
+<Each content="site.team">
+    <p>{{name}} — {{role}}</p>
+</Each>
+```
+
+### Workflow
+
+1. Edit `content/*.json` on GitHub (web UI, API, or local clone)
+2. Push triggers your build pipeline (`simple build`)
+3. Site updates with new content &mdash; no code changes needed
+
 ## Edge functions
 
 JavaScript files in `functions/` are executed server-side via an embedded QuickJS runtime.
@@ -312,7 +395,7 @@ fetch_timeout = 10          # outbound HTTP timeout (seconds)
 # ── Security headers ────────────────────────────────────
 # All headers below can be overridden. Set to "" to disable.
 [security_headers]
-content_security_policy = "default-src 'self'; style-src 'self' 'unsafe-inline'"
+content_security_policy = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
 strict_transport_security = "max-age=63072000; includeSubDomains"
 x_frame_options = "DENY"
 referrer_policy = "strict-origin-when-cross-origin"
@@ -390,7 +473,7 @@ Sent on **all** responses (static files and API):
 
 | Header | Default | Configurable |
 |--------|---------|:------------:|
-| `Content-Security-Policy` | `default-src 'self'; style-src 'self' 'unsafe-inline'` | Yes |
+| `Content-Security-Policy` | `default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'` | Yes |
 | `Strict-Transport-Security` | `max-age=63072000; includeSubDomains` | Yes |
 | `X-Frame-Options` | `DENY` | Yes |
 | `X-Content-Type-Options` | `nosniff` | No |
@@ -408,6 +491,28 @@ Everything inside `static/` is copied as-is into `dist/`, preserving directory s
 Cache headers:
 - HTML files: `Cache-Control: no-cache`
 - Other files: `Cache-Control: public, max-age=86400`
+
+## CSS tree-shaking
+
+At build time, CSS is automatically tree-shaken and inlined per page.
+
+For each HTML page, the build:
+1. Parses the CSS file into individual rules
+2. Extracts all tags, classes, and IDs from the page's HTML
+3. Keeps only the rules whose selectors match elements actually present in the page
+4. Replaces the `<link rel="stylesheet">` with an inline `<style>` containing only the used rules
+5. Removes the original CSS file from `dist/` (no longer needed)
+
+Rules that are always kept regardless of the page content:
+- `@font-face` declarations
+- `@keyframes` animations
+- `:root` and `*` selectors
+
+`@media` and `@supports` blocks are kept only if they contain at least one matching inner rule. Grouped selectors (`a, .card, span`) are pruned individually &mdash; only the matching groups are emitted.
+
+**Example:** a page with `<main>`, `<p>`, and `<footer>` will not include rules for `.hero`, `.grid`, `.card`, or `.counter` even if those rules exist in the source CSS.
+
+The inlined CSS is compacted (whitespace collapsed) and then benefits from the same gzip/brotli pre-compression as the rest of the HTML.
 
 ## Docker deployment
 
