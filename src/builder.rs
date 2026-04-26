@@ -317,8 +317,12 @@ pub fn build() -> Result<(), String> {
         Path::new(FUNCTIONS_DIR),
     )?;
 
-    // Build component templates block for runtime JS rendering
-    let templates_block = build_templates_block(&components);
+    // Build component templates block only if JS uses the client-side runtime
+    let templates_block = if uses_client_runtime(Path::new(STATIC_DIR)) {
+        build_templates_block(&components)
+    } else {
+        String::new()
+    };
 
     // Process pages
     let pages_path = Path::new(PAGES_DIR);
@@ -363,6 +367,37 @@ pub fn build() -> Result<(), String> {
 
     println!("-> {DIST_DIR}/");
     Ok(())
+}
+
+/// Returns true if any JS file in the static directory references `Simple.`,
+/// indicating the project uses the client-side rendering runtime.
+fn uses_client_runtime(static_dir: &Path) -> bool {
+    if !static_dir.exists() {
+        return false;
+    }
+    scan_js_for_simple(static_dir)
+}
+
+fn scan_js_for_simple(dir: &Path) -> bool {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if scan_js_for_simple(&path) {
+                return true;
+            }
+        } else if path.extension().and_then(|e| e.to_str()) == Some("js") {
+            if let Ok(content) = fs::read_to_string(&path) {
+                if content.contains("Simple.") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Builds `<template>` elements for all components + the runtime script.
@@ -1593,6 +1628,38 @@ mod tests {
         let input = "<template id=\"tpl-Card\"><div>  {{title}}  </div></template>";
         let result = minify_html(input);
         assert!(result.contains("  {{title}}  "), "template content should be preserved");
+    }
+
+    // -----------------------------------------------------------------------
+    // Client runtime detection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn detects_simple_usage_in_js() {
+        let dir = tempdir("runtime_yes");
+        fs::write(dir.join("app.js"), "Simple.list('#el', 'Card', items);").unwrap();
+        assert!(uses_client_runtime(&dir));
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn no_runtime_without_simple() {
+        let dir = tempdir("runtime_no");
+        fs::write(dir.join("app.js"), "fetch('/api/hello').then(r => r.json());").unwrap();
+        assert!(!uses_client_runtime(&dir));
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn no_runtime_empty_dir() {
+        let dir = tempdir("runtime_empty");
+        assert!(!uses_client_runtime(&dir));
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn no_runtime_missing_dir() {
+        assert!(!uses_client_runtime(Path::new("/tmp/does_not_exist_simple_rt")));
     }
 
     // -----------------------------------------------------------------------
