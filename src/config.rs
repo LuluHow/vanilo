@@ -23,6 +23,8 @@ pub struct Config {
     pub permissions_policy: String,
     pub cross_origin_opener_policy: String,
     pub cross_origin_resource_policy: String,
+    // CORS for /api/* endpoints
+    pub api_cors: String,
     // proxy
     pub trusted_proxy: Option<String>,
     // build
@@ -53,6 +55,7 @@ impl Default for Config {
             permissions_policy: "camera=(), microphone=(), geolocation=()".into(),
             cross_origin_opener_policy: "same-origin".into(),
             cross_origin_resource_policy: "same-origin".into(),
+            api_cors: String::new(),
             trusted_proxy: None,
             minify_js: false,
             webhook_path: None,
@@ -139,6 +142,9 @@ pub fn load() -> Config {
         if let Some(s) = v.get("permissions_policy") { config.permissions_policy = s.clone(); }
         if let Some(s) = v.get("cross_origin_opener_policy") { config.cross_origin_opener_policy = s.clone(); }
         if let Some(s) = v.get("cross_origin_resource_policy") { config.cross_origin_resource_policy = s.clone(); }
+
+        // CORS
+        if let Some(s) = v.get("api_cors") { config.api_cors = s.clone(); }
 
         // Proxy
         if let Some(s) = v.get("trusted_proxy") {
@@ -294,5 +300,26 @@ mod tests {
         let h = config.security_headers();
         assert!(h.contains("X-Frame-Options: DENYInjected: bad"));
         assert!(!h.contains("\r\nInjected"));
+    }
+
+    #[test]
+    fn parse_toml_api_cors() {
+        let input = "api_cors = \"https://example.com\"\n";
+        let values = parse_toml(input);
+        assert_eq!(values.get("api_cors").unwrap(), "https://example.com");
+    }
+
+    #[test]
+    fn api_cors_default_empty() {
+        let config = Config::default();
+        assert!(config.api_cors.is_empty());
+    }
+
+    #[test]
+    fn security_headers_does_not_include_cors() {
+        let mut config = Config::default();
+        config.api_cors = "*".into();
+        let h = config.security_headers();
+        assert!(!h.contains("Access-Control"));
     }
 }

@@ -206,7 +206,7 @@ pub fn init() -> Result<(), String> {
         <h2>Edge functions</h2>
         <p>A JS file in <code>functions/</code> becomes an API endpoint. <code>functions/notes.js</code> serves <code>/api/notes</code>. Built-in SQLite and outbound <code>fetch()</code>.</p>
         <pre><code>function handler(req) {
-    // req.method, req.path, req.body, req.query
+    // req.method, req.path, req.body, req.query, req.headers
 
     db.exec("CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, name TEXT)");
     db.exec("INSERT INTO t (name) VALUES (?)", [req.body]);
@@ -400,6 +400,12 @@ fetch_timeout = 10      # outbound HTTP timeout, seconds
 # JS minification (strips comments, trims whitespace). Off by default because
 # the minifier does not handle regex literals — enable only for simple JS.
 # minify_js = true
+
+# CORS for edge functions (/api/*). Controls which origins can call your API from browsers.
+# Empty (default) = no CORS headers = same-origin only (most secure).
+# "*" = allow all origins.
+# Specific: "https://example.com" or multiple: "https://a.com, https://b.com"
+# api_cors = ""
 
 [security_headers]
 content_security_policy = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self' https://cdn.jsdelivr.net"

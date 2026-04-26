@@ -23,6 +23,7 @@ pub struct FnRequest {
     pub path: String,
     pub body: String,
     pub query: String,
+    pub headers: HashMap<String, String>,
 }
 
 pub struct FnResponse {
@@ -127,7 +128,8 @@ var __req = {{
     method: {method},
     path: {path},
     body: {body},
-    query: {query}
+    query: {query},
+    headers: {headers}
 }};
 
 {source}
@@ -154,6 +156,21 @@ JSON.stringify({{
             path = json_string(&req.path),
             body = json_string(&req.body),
             query = json_string(&req.query),
+            headers = {
+                let mut h = String::from("{");
+                let mut keys: Vec<&String> = req.headers.keys().collect();
+                keys.sort();
+                for (i, key) in keys.iter().enumerate() {
+                    if let Some(val) = req.headers.get(*key) {
+                        if i > 0 { h.push(','); }
+                        h.push_str(&json_string(key));
+                        h.push(':');
+                        h.push_str(&json_string(val));
+                    }
+                }
+                h.push('}');
+                h
+            },
         );
 
         let result: String = ctx
@@ -512,6 +529,18 @@ fn fetch_impl(url: &str, opts_json: &str, resolved_ip: Option<std::net::IpAddr>,
 // ---------------------------------------------------------------------------
 // SSRF protection
 // ---------------------------------------------------------------------------
+
+/// Headers to strip from incoming requests before passing to edge functions.
+/// Transport/framing and hop-by-hop headers that are server-internal.
+pub fn is_filtered_request_header(name: &str) -> bool {
+    matches!(
+        name.to_lowercase().as_str(),
+        "host" | "content-length" | "transfer-encoding"
+            | "connection" | "upgrade" | "keep-alive"
+            | "te" | "trailer"
+            | "accept-encoding"
+    )
+}
 
 fn is_blocked_header(name: &str) -> bool {
     matches!(
@@ -1059,6 +1088,32 @@ mod tests {
         assert!(!is_blocked_header("Authorization"));
         assert!(!is_blocked_header("Content-Type"));
         assert!(!is_blocked_header("Accept"));
+    }
+
+    // -----------------------------------------------------------------------
+    // is_filtered_request_header
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn filtered_request_headers() {
+        assert!(is_filtered_request_header("Host"));
+        assert!(is_filtered_request_header("content-length"));
+        assert!(is_filtered_request_header("Transfer-Encoding"));
+        assert!(is_filtered_request_header("connection"));
+        assert!(is_filtered_request_header("upgrade"));
+        assert!(is_filtered_request_header("keep-alive"));
+        assert!(is_filtered_request_header("accept-encoding"));
+    }
+
+    #[test]
+    fn passed_through_request_headers() {
+        assert!(!is_filtered_request_header("authorization"));
+        assert!(!is_filtered_request_header("cookie"));
+        assert!(!is_filtered_request_header("x-custom-header"));
+        assert!(!is_filtered_request_header("accept"));
+        assert!(!is_filtered_request_header("content-type"));
+        assert!(!is_filtered_request_header("origin"));
+        assert!(!is_filtered_request_header("referer"));
     }
 
     // -----------------------------------------------------------------------
