@@ -29,6 +29,7 @@ pub struct Config {
     pub trusted_proxy: Option<String>,
     // build
     pub minify_js: bool,
+    pub build_dir: Option<String>,
     // webhook
     pub webhook_path: Option<String>,
     pub webhook_secret: Option<String>,
@@ -58,6 +59,7 @@ impl Default for Config {
             api_cors: String::new(),
             trusted_proxy: None,
             minify_js: false,
+            build_dir: None,
             webhook_path: None,
             webhook_secret: None,
             webhook_rate_limit: 5,
@@ -117,6 +119,7 @@ struct RawConfig {
     api_cors: Option<String>,
     trusted_proxy: Option<String>,
     minify_js: Option<bool>,
+    build_dir: Option<String>,
     // Flat legacy keys (backward compat)
     content_security_policy: Option<String>,
     strict_transport_security: Option<String>,
@@ -196,6 +199,10 @@ fn load_from_str(content: &str) -> Result<Config, String> {
     if let Some(v) = raw.fetch_timeout { config.fetch_timeout = v; }
     if let Some(v) = raw.api_cors { config.api_cors = v; }
     if let Some(v) = raw.minify_js { config.minify_js = v; }
+    if let Some(v) = raw.build_dir {
+        let v = v.trim().to_string();
+        if !v.is_empty() { config.build_dir = Some(v); }
+    }
 
     if let Some(v) = raw.trusted_proxy {
         let v = v.trim().to_string();

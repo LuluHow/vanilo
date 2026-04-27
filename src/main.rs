@@ -83,28 +83,51 @@ fn main() {
             uninstall();
         }
         Some("serve") => {
-            if let Err(e) = builder::build() {
-                eprintln!("error: {e}");
-                process::exit(1);
-            }
-            let mut cfg = config::load();
-            if let Some(port) = args.get(2).and_then(|s| s.parse().ok()) {
-                cfg.port = port;
-            }
-            let build_lock = Arc::new(Mutex::new(()));
-            let lock_clone = build_lock.clone();
-            std::thread::spawn(move || {
-                if let Err(e) = watcher::watch(lock_clone) {
-                    eprintln!("watch error: {e}");
+            let prod = args.iter().any(|a| a == "--prod");
+
+            if prod {
+                if !std::path::Path::new("dist").exists() {
+                    eprintln!("error: dist/ not found — run `vanilo build` first");
+                    process::exit(1);
                 }
-            });
+            } else {
+                if let Err(e) = builder::build() {
+                    eprintln!("error: {e}");
+                    process::exit(1);
+                }
+            }
+
+            let mut cfg = config::load();
+            for arg in &args[2..] {
+                if let Ok(port) = arg.parse::<u16>() {
+                    cfg.port = port;
+                }
+            }
+
+            let build_lock = Arc::new(Mutex::new(()));
+
+            if !prod {
+                let lock_clone = build_lock.clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = watcher::watch(lock_clone) {
+                        eprintln!("watch error: {e}");
+                    }
+                });
+            }
+
             if let Err(e) = server::serve(cfg, build_lock) {
                 eprintln!("error: {e}");
                 process::exit(1);
             }
         }
-        _ => {
-            eprintln!("usage: vanilo <build|init|serve [port]|uninstall>");
+        Some(cmd) => {
+            eprintln!("error: unknown command '{cmd}'");
+            eprintln!("commands: build, init, serve [--prod] [port], uninstall");
+            process::exit(1);
+        }
+        None => {
+            eprintln!("error: no command provided");
+            eprintln!("commands: build, init, serve [--prod] [port], uninstall");
             process::exit(1);
         }
     }

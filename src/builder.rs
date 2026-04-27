@@ -18,8 +18,6 @@ const STATIC_DIR: &str = "static";
 const FUNCTIONS_DIR: &str = "functions";
 const CONTENT_DIR: &str = "content";
 const DIST_DIR: &str = "dist";
-const DIST_TMP: &str = "dist_tmp";
-const DIST_OLD: &str = "dist_old";
 const LAYOUT_FILE: &str = "layout.html";
 
 /// Minimal client-side runtime for rendering components from <template> elements.
@@ -106,6 +104,10 @@ fetch_timeout = 10      # outbound HTTP timeout, seconds
 # the minifier does not handle regex literals — enable only for simple JS.
 # minify_js = true
 
+# Build directory for temporary output. Defaults to a temp dir in /tmp.
+# Set to a local path if /tmp is on a different filesystem.
+# build_dir = "dist_tmp"
+
 # CORS for edge functions (/api/*). Controls which origins can call your API from browsers.
 # Empty (default) = no CORS headers = same-origin only (most secure).
 # "*" = allow all origins.
@@ -136,23 +138,15 @@ content_security_policy = "default-src 'self'; script-src 'self' 'unsafe-inline'
 
     // Dockerfile
     if !Path::new("Dockerfile").exists() {
-        let dockerfile = r#"# Build vanilo from source
-FROM rust:1-bookworm AS toolchain
-RUN apt-get update && apt-get install -y libclang-dev && rm -rf /var/lib/apt/lists/*
-WORKDIR /build
-RUN cargo install vanilo
-
-# Build the site
-FROM debian:bookworm-slim
-RUN useradd -r -s /usr/sbin/nologin vanilo
-COPY --from=toolchain /usr/local/cargo/bin/vanilo /usr/local/bin/vanilo
+        let dockerfile = r#"FROM luluhow/vanilo:latest
+USER root
 WORKDIR /app
-COPY . .
-RUN vanilo build
+COPY --chown=vanilo:vanilo . .
+RUN chown -R vanilo:vanilo /app && vanilo build
 USER vanilo
 EXPOSE 3000
 ENV HOST=0.0.0.0
-CMD ["vanilo", "serve"]
+CMD ["serve", "--prod"]
 "#;
         write_file("Dockerfile", dockerfile)?;
     }
@@ -194,11 +188,20 @@ CMD ["vanilo", "serve"]
 
 /// Builds the site: resolves components, wraps in layout, outputs to dist/.
 pub fn build() -> Result<(), String> {
-    // Build into temp directory, then atomically swap
-    if Path::new(DIST_TMP).exists() {
-        fs::remove_dir_all(DIST_TMP).map_err(|e| format!("clean dist_tmp: {e}"))?;
+    // Build into a temp directory, then swap into dist/
+    let config = crate::config::load();
+    let build_dir = config.build_dir.unwrap_or_else(|| {
+        std::env::temp_dir()
+            .join(format!("vanilo_build_{}", std::process::id()))
+            .to_string_lossy()
+            .into_owned()
+    });
+    let dist_tmp = Path::new(&build_dir);
+
+    if dist_tmp.exists() {
+        fs::remove_dir_all(dist_tmp).map_err(|e| format!("clean {build_dir}: {e}"))?;
     }
-    fs::create_dir_all(DIST_TMP).map_err(|e| format!("create dist_tmp: {e}"))?;
+    fs::create_dir_all(dist_tmp).map_err(|e| format!("create {build_dir}: {e}"))?;
 
     // Load components
     let components = component::load_components(Path::new(COMPONENTS_DIR))?;
@@ -237,59 +240,53 @@ pub fn build() -> Result<(), String> {
         return Err(format!("{PAGES_DIR}/ directory not found"));
     }
 
-    let page_count = process_dir(pages_path, pages_path, Path::new(DIST_TMP), &components, &layout, &templates_block, &content_data)?;
+    let page_count = process_dir(pages_path, pages_path, dist_tmp, &components, &layout, &templates_block, &content_data)?;
     println!("built {page_count} page(s)");
 
     // Copy static files
     let static_path = Path::new(STATIC_DIR);
     if static_path.exists() {
-        let copied = copy_dir_recursive(static_path, Path::new(DIST_TMP))?;
+        let copied = copy_dir_recursive(static_path, dist_tmp)?;
         println!("copied {copied} static file(s)");
     }
 
     // CSS tree-shaking: inline only used rules per page
-    let inlined = inline_critical_css(Path::new(DIST_TMP))?;
+    let inlined = inline_critical_css(dist_tmp)?;
     if inlined > 0 {
         println!("inlined CSS for {inlined} page(s)");
     }
 
     // Minify JS files in dist/ (opt-in via config)
-    let config = crate::config::load();
     if config.minify_js {
-        let minified_js = minify_js_files(Path::new(DIST_TMP))?;
+        let minified_js = minify_js_files(dist_tmp)?;
         if minified_js > 0 {
             println!("minified {minified_js} JS file(s)");
         }
     }
 
     // Content-hash CSS/JS filenames for cache busting
-    let renames = hash_static_assets(Path::new(DIST_TMP))?;
+    let renames = hash_static_assets(dist_tmp)?;
     if !renames.is_empty() {
-        rewrite_html_refs(Path::new(DIST_TMP), &renames)?;
+        rewrite_html_refs(dist_tmp, &renames)?;
         println!("hashed {} asset(s)", renames.len());
     }
 
     // Pre-compress with gzip + brotli
-    let compressed = precompress_dir(Path::new(DIST_TMP))?;
+    let compressed = precompress_dir(dist_tmp)?;
     if compressed > 0 {
         println!("pre-compressed {compressed} file(s)");
     }
 
-    // Atomic swap: dist_tmp -> dist
-    if Path::new(DIST_OLD).exists() {
-        fs::remove_dir_all(DIST_OLD).map_err(|e| format!("clean dist_old: {e}"))?;
+    // Swap: remove dist, rename dist_tmp -> dist
+    let dist = Path::new(DIST_DIR);
+    if dist.exists() {
+        fs::remove_dir_all(dist).map_err(|e| format!("remove dist: {e}"))?;
     }
-    if Path::new(DIST_DIR).exists() {
-        fs::rename(DIST_DIR, DIST_OLD).map_err(|e| format!("rename dist -> dist_old: {e}"))?;
+    if fs::rename(dist_tmp, dist).is_err() {
+        // Cross-device fallback: copy then delete
+        copy_dir_recursive(dist_tmp, dist)?;
+        let _ = fs::remove_dir_all(dist_tmp);
     }
-    if let Err(e) = fs::rename(DIST_TMP, DIST_DIR) {
-        // Recovery: restore old dist
-        if Path::new(DIST_OLD).exists() {
-            let _ = fs::rename(DIST_OLD, DIST_DIR);
-        }
-        return Err(format!("rename dist_tmp -> dist: {e}"));
-    }
-    let _ = fs::remove_dir_all(DIST_OLD);
 
     println!("-> {DIST_DIR}/");
     Ok(())
