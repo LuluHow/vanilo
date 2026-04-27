@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 
-const DEBOUNCE_MS: u64 = 300;
+const DEBOUNCE_MS: u64 = 1000;
 
 const WATCH_DIRS: &[&str] = &[
     "pages",

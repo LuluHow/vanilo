@@ -39,7 +39,7 @@ pub fn init() -> Result<(), String> {
     create_dir(FUNCTIONS_DIR)?;
     create_dir(CONTENT_DIR)?;
 
-    // Layout — uses {{@site.title}} from content CMS
+    // Layout
     if !Path::new(LAYOUT_FILE).exists() {
         let layout = r#"<!DOCTYPE html>
 <html lang="en">
@@ -48,7 +48,6 @@ pub fn init() -> Result<(), String> {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{title}} — {{@site.title}}</title>
     <link rel="stylesheet" href="/style.css">
-    <script src="/main.js" defer></script>
 </head>
 <body>
 </body>
@@ -56,323 +55,29 @@ pub fn init() -> Result<(), String> {
         write_file(LAYOUT_FILE, layout)?;
     }
 
-    // Header component — props + children slot
-    let header_path = format!("{COMPONENTS_DIR}/Header.html");
-    if !Path::new(&header_path).exists() {
-        write_file(&header_path, r#"<header>
-    <a href="/" class="logo">{{title}}</a>
-</header>"#)?;
-    }
-
-    // Footer component
-    let footer_path = format!("{COMPONENTS_DIR}/Footer.html");
-    if !Path::new(&footer_path).exists() {
-        write_file(&footer_path, r#"<footer>
-    <p>Built with vanilo</p>
-</footer>"#)?;
-    }
-
-    // Card component — reused in <Each> (build-time) and Vanilo.list() (client-side)
-    let card_path = format!("{COMPONENTS_DIR}/Card.html");
-    if !Path::new(&card_path).exists() {
-        write_file(&card_path, r#"<div class="card">
-    <h3>{{title}}</h3>
-    <p>{{description}}</p>
-</div>"#)?;
-    }
-
-    // Tag component — nested inside Card to demonstrate component composition
-    let tag_path = format!("{COMPONENTS_DIR}/Tag.html");
-    if !Path::new(&tag_path).exists() {
-        write_file(&tag_path, r#"<span class="tag">{{label}}</span>"#)?;
-    }
-
-    // Index page — bookmarks from CMS + <Each> iteration + nested components
+    // Index page
     let index_path = format!("{PAGES_DIR}/index.html");
     if !Path::new(&index_path).exists() {
-        let index = r#"<meta name="title" content="Bookmarks">
-
-<Header title="{{@site.title}}">
-    <nav>
-        <a href="/">Bookmarks</a>
-        <a href="/notes">Notes</a>
-        <a href="/docs">Docs</a>
-    </nav>
-</Header>
+        let index = r#"<meta name="title" content="Home">
 
 <main>
     <h1>{{@site.title}}</h1>
-    <p class="sub">{{@site.description}}</p>
-
-    <section class="grid">
-        <Each content="bookmarks">
-            <Card title="{{title}}" description="{{description}}">
-                <Tag label="{{tag}}" />
-            </Card>
-        </Each>
-    </section>
-</main>
-
-<Footer />"#;
+    <p>Edit <code>pages/index.html</code> to get started.</p>
+</main>"#;
         write_file(&index_path, index)?;
     }
 
-    // Notes page — dynamic search + form + Vanilo.list/put client-side rendering
-    let notes_path = format!("{PAGES_DIR}/notes.html");
-    if !Path::new(&notes_path).exists() {
-        let notes = r#"<meta name="title" content="Notes">
-
-<Header title="{{@site.title}}">
-    <nav>
-        <a href="/">Bookmarks</a>
-        <a href="/notes">Notes</a>
-        <a href="/docs">Docs</a>
-    </nav>
-</Header>
-
-<main>
-    <h1>Notes</h1>
-    <p class="sub">Saved in SQLite via edge functions. Search and add from the browser with client-side rendering.</p>
-
-    <div class="search-box">
-        <input type="text" id="search" placeholder="Search notes..." autocomplete="off">
-    </div>
-
-    <div class="results" id="results"></div>
-
-    <hr>
-
-    <h3>Add a note</h3>
-    <form class="add-form" id="add-form">
-        <input type="text" name="title" placeholder="Title" required>
-        <input type="text" name="description" placeholder="Description">
-        <button type="submit">Save</button>
-    </form>
-    <div class="msg" id="msg"></div>
-</main>
-
-<Footer />"#;
-        write_file(&notes_path, notes)?;
-    }
-
-    // Docs page — framework documentation
-    let docs_path = format!("{PAGES_DIR}/docs.html");
-    if !Path::new(&docs_path).exists() {
-        let docs = r##"<meta name="title" content="Docs">
-
-<Header title="{{@site.title}}">
-    <nav>
-        <a href="/">Bookmarks</a>
-        <a href="/notes">Notes</a>
-        <a href="/docs">Docs</a>
-    </nav>
-</Header>
-
-<main class="doc">
-    <h1>Documentation</h1>
-    <p class="sub">Everything you need to build with vanilo.</p>
-
-    <section>
-        <h2>Components</h2>
-        <p>Any <code>.html</code> file in <code>components/</code> becomes a component. PascalCase name, props via attributes, children via slot.</p>
-        <pre><code>&lt;!-- components/Card.html --&gt;
-&lt;div class="card"&gt;
-    &lt;h3&gt;{{title}}&lt;/h3&gt;
-    &lt;p&gt;{{description}}&lt;/p&gt;
-&lt;/div&gt;
-
-&lt;!-- Use it in any page --&gt;
-&lt;Card title="Hello" description="World"&gt;
-    &lt;Tag label="new" /&gt;
-&lt;/Card&gt;</code></pre>
-        <p>Props are HTML-escaped by default. Use triple braces <code>{{{raw}}}</code> for unescaped output. Children are inserted before the closing tag of the root element.</p>
-    </section>
-
-    <section>
-        <h2>Content CMS</h2>
-        <p>Drop JSON files in <code>content/</code>. Reference values anywhere with <code>{{@file.path}}</code>. Loop over arrays with <code>&lt;Each&gt;</code>.</p>
-        <pre><code>&lt;!-- content/site.json: { "title": "My Site" } --&gt;
-&lt;h1&gt;{{@site.title}}&lt;/h1&gt;
-
-&lt;!-- content/bookmarks.json: [{ "title": "...", "tag": "..." }] --&gt;
-&lt;Each content="bookmarks"&gt;
-    &lt;Card title="{{title}}"&gt;
-        &lt;Tag label="{{tag}}" /&gt;
-    &lt;/Card&gt;
-&lt;/Each&gt;</code></pre>
-    </section>
-
-    <section>
-        <h2>Edge functions</h2>
-        <p>A JS file in <code>functions/</code> becomes an API endpoint. <code>functions/notes.js</code> serves <code>/api/notes</code>. Built-in SQLite and outbound <code>fetch()</code>.</p>
-        <pre><code>function handler(req) {
-    // req.method, req.path, req.body, req.query, req.headers
-
-    db.exec("CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, name TEXT)");
-    db.exec("INSERT INTO t (name) VALUES (?)", [req.body]);
-    var rows = db.query("SELECT * FROM t WHERE name LIKE ?", ["%search%"]);
-
-    // outbound HTTP
-    var res = fetch("https://api.example.com/data", {
-        headers: { "Authorization": "Bearer token" }
-    });
-    var data = JSON.parse(res.body);
-
-    return {
-        status: 200,
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ rows: rows, external: data })
-    };
-}</code></pre>
-    </section>
-
-    <section>
-        <h2>Client-side rendering</h2>
-        <p>Reuse your components in the browser. vanilo injects a minimal runtime when your JS references <code>Vanilo.*</code>.</p>
-        <pre><code>// Render a list of components into a container
-Vanilo.list("#results", "Card", [
-    { title: "First", description: "Hello" },
-    { title: "Second", description: "World" }
-]);
-
-// Render a single component
-Vanilo.put("#message", "Tag", { label: "Saved!" });
-
-// Get HTML string without inserting
-var html = Vanilo.render("Card", { title: "Preview" });</code></pre>
-    </section>
-
-    <section>
-        <h2>CSS tree-shaking</h2>
-        <p>At build time, each page gets only the CSS it actually uses. Classes added dynamically by JS need a safelist comment.</p>
-        <pre><code>/* vanilo:keep .card .tag .msg */
-
-.card { border: 1px solid #333; }
-.tag { color: blue; }
-.unused { color: red; } /* stripped from pages that don't use it */</code></pre>
-    </section>
-
-    <section>
-        <h2>Deploy</h2>
-        <p>Build once, serve anywhere. The generated <code>Dockerfile</code> and <code>compose.yaml</code> handle everything.</p>
-        <pre><code>docker compose up -d</code></pre>
-        <p>For auto-rebuild on git push, uncomment the <code>[webhook]</code> section in <code>vanilo.toml</code> and add the URL to your repo settings.</p>
-    </section>
-
-    <hr>
-
-    <div class="zen" id="zen">...</div>
-</main>
-
-<Footer />"##;
-        write_file(&docs_path, docs)?;
-    }
-
-    // Edge function: notes API — GET search (req.query) + POST add (req.body) + SQLite CRUD
-    let fn_notes = format!("{FUNCTIONS_DIR}/notes.js");
-    if !Path::new(&fn_notes).exists() {
-        let notes_fn = r#"function handler(req) {
-    db.exec("CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, description TEXT)");
-
-    if (req.method === "POST") {
-        var data = JSON.parse(req.body);
-        if (!data.title) {
-            return {
-                status: 400,
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify({ ok: false, error: "title required" })
-            };
-        }
-        db.exec("INSERT INTO notes (title, description) VALUES (?, ?)", [data.title, data.description || ""]);
-        return {
-            status: 201,
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ ok: true })
-        };
-    }
-
-    var q = "";
-    var parts = req.query.split("&");
-    for (var i = 0; i < parts.length; i++) {
-        var kv = parts[i].split("=");
-        if (kv[0] === "q") q = decodeURIComponent(kv[1] || "");
-    }
-
-    var rows;
-    if (q) {
-        rows = db.query("SELECT id, title, description FROM notes WHERE title LIKE ? ORDER BY id DESC", ["%" + q + "%"]);
-    } else {
-        rows = db.query("SELECT id, title, description FROM notes ORDER BY id DESC");
-    }
-
-    return {
-        status: 200,
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ notes: rows })
-    };
-}"#;
-        write_file(&fn_notes, notes_fn)?;
-    }
-
-    // Edge function: github — demonstrates fetch() for outbound HTTP
-    let fn_github = format!("{FUNCTIONS_DIR}/github.js");
-    if !Path::new(&fn_github).exists() {
-        let github_fn = r#"function handler(req) {
-    var res = fetch("https://api.github.com/zen", {
-        headers: { "User-Agent": "vanilo" }
-    });
-
-    return {
-        status: 200,
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ zen: res.body })
-    };
-}"#;
-        write_file(&fn_github, github_fn)?;
-    }
-
-    // Starter CSS/JS (embedded from scaffold/)
+    // Starter CSS
     if !Path::new(&format!("{STATIC_DIR}/style.css")).exists() {
         write_file(&format!("{STATIC_DIR}/style.css"), include_str!("scaffold/style.css"))?;
     }
-    if !Path::new(&format!("{STATIC_DIR}/main.js")).exists() {
-        write_file(&format!("{STATIC_DIR}/main.js"), include_str!("scaffold/main.js"))?;
-    }
 
-    // Content: site metadata — used in layout via {{@site.title}}
+    // Content: site metadata
     let site_json = format!("{CONTENT_DIR}/site.json");
     if !Path::new(&site_json).exists() {
         write_file(&site_json, r#"{
-    "title": "vanilo",
-    "description": "Notes & bookmarks — powered by HTML, components, and edge functions."
+    "title": "My Site"
 }"#)?;
-    }
-
-    // Content: bookmarks — iterated with <Each content="bookmarks"> on the homepage
-    let bookmarks_json = format!("{CONTENT_DIR}/bookmarks.json");
-    if !Path::new(&bookmarks_json).exists() {
-        write_file(&bookmarks_json, r#"[
-    {
-        "title": "MDN Web Docs",
-        "description": "The essential reference for HTML, CSS, and JavaScript.",
-        "tag": "reference"
-    },
-    {
-        "title": "Hacker News",
-        "description": "Tech news and community discussion.",
-        "tag": "daily"
-    },
-    {
-        "title": "Can I Use",
-        "description": "Browser compatibility tables for web technologies.",
-        "tag": "tools"
-    },
-    {
-        "title": "HTTP Status Codes",
-        "description": "Quick reference for HTTP response status codes.",
-        "tag": "reference"
-    }
-]"#)?;
     }
 
     // Config
@@ -478,21 +183,10 @@ CMD ["vanilo", "serve"]
     println!("project initialized:");
     println!("  {LAYOUT_FILE}");
     println!("  {PAGES_DIR}/index.html");
-    println!("  {PAGES_DIR}/notes.html");
-    println!("  {PAGES_DIR}/docs.html");
-    println!("  {COMPONENTS_DIR}/Header.html");
-    println!("  {COMPONENTS_DIR}/Footer.html");
-    println!("  {COMPONENTS_DIR}/Card.html");
-    println!("  {COMPONENTS_DIR}/Tag.html");
-    println!("  {FUNCTIONS_DIR}/notes.js");
-    println!("  {FUNCTIONS_DIR}/github.js");
-    println!("  {CONTENT_DIR}/site.json");
-    println!("  {CONTENT_DIR}/bookmarks.json");
     println!("  {STATIC_DIR}/style.css");
-    println!("  {STATIC_DIR}/main.js");
+    println!("  {CONTENT_DIR}/site.json");
     println!("  vanilo.toml");
-    println!("  Dockerfile");
-    println!("  compose.yaml");
+    println!("  Dockerfile + compose.yaml");
     println!();
     println!("run `vanilo serve` to start dev server");
     Ok(())
