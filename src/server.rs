@@ -330,10 +330,15 @@ fn handle_connection(
     }
 
     if raw_path.starts_with("/api/") {
+        // Extract function name for per-function config lookup
+        let fn_name = raw_path.strip_prefix("/api/").unwrap_or("")
+            .split('?').next().unwrap_or("")
+            .split('/').next().unwrap_or("");
+
         // CORS preflight — respond fast, skip rate limiting and function execution
         if method == "OPTIONS" {
             let origin = extract_header(&headers_str, "origin");
-            let cors = cors_headers(config, origin.as_deref());
+            let cors = cors_headers(config.fn_cors(fn_name), origin.as_deref());
             if cors.is_empty() {
                 let resp = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 let _ = stream.write_all(resp.as_bytes());
@@ -346,26 +351,36 @@ fn handle_connection(
             return;
         }
 
-        // Rate limiting by IP (trust X-Forwarded-For when behind a configured proxy)
+        // Rate limiting by IP (per-function bucket when configured, otherwise global)
         let ip = client_ip(stream, &headers_str, config);
+        let fn_limit = config.fn_rate_limit(fn_name);
+        let fn_window = config.fn_rate_window(fn_name);
+        let rate_key = if config.has_fn_rate_config(fn_name) {
+            format!("{ip}:{fn_name}")
+        } else {
+            ip
+        };
 
         {
             let mut map = rate_map.lock().unwrap_or_else(|e| e.into_inner());
 
-            // Prune stale entries
+            // Prune stale entries (use max window across all configs)
             if map.len() > 100 {
+                let max_window = config.functions.values()
+                    .filter_map(|fc| fc.rate_window)
+                    .fold(config.rate_window, |acc, w| acc.max(w));
                 let cutoff = Instant::now();
-                map.retain(|_, (_, ts)| cutoff.duration_since(*ts).as_secs() < config.rate_window * 2);
+                map.retain(|_, (_, ts)| cutoff.duration_since(*ts).as_secs() < max_window * 2);
             }
 
             let now = Instant::now();
-            let entry = map.entry(ip).or_insert((0, now));
-            if now.duration_since(entry.1).as_secs() >= config.rate_window {
+            let entry = map.entry(rate_key).or_insert((0, now));
+            if now.duration_since(entry.1).as_secs() >= fn_window {
                 *entry = (0, now);
             }
             entry.0 += 1;
 
-            if entry.0 > config.rate_limit {
+            if entry.0 > fn_limit {
                 let resp = "HTTP/1.1 429 Too Many Requests\r\nContent-Type: text/plain\r\nContent-Length: 12\r\nConnection: close\r\n\r\nrate limited";
                 let _ = stream.write_all(resp.as_bytes());
                 return;
@@ -396,13 +411,13 @@ fn handle_connection(
         // HEAD → execute as GET, suppress body in response
         let effective_method = if method == "HEAD" { "GET" } else { method };
         let req_headers = parse_request_headers(&headers_str);
-        let (status, body, content_type) = handle_function(effective_method, raw_path, &req_body, req_headers, config, functions_dir);
+        let (status, body, content_type, extra_headers) = handle_function(effective_method, raw_path, &req_body, req_headers, config, functions_dir);
         let content_type = sanitize_header_value(&content_type);
         let body_bytes = body.as_bytes();
 
         // CORS headers for the actual response
         let origin = extract_header(&headers_str, "origin");
-        let cors = cors_headers(config, origin.as_deref());
+        let cors = cors_headers(config.fn_cors(fn_name), origin.as_deref());
 
         // On-the-fly compression for API responses (prefer brotli > gzip)
         let accept_br = accepts_encoding(&headers_str, "br");
@@ -435,7 +450,7 @@ fn handle_connection(
                 (gzip_compress(body_bytes), "gzip")
             };
             let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nContent-Encoding: {enc}\r\n{cors_no_vary}{sec}Cache-Control: no-store\r\n{vary}Connection: close\r\n\r\n",
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nContent-Encoding: {enc}\r\n{extra_headers}{cors_no_vary}{sec}Cache-Control: no-store\r\n{vary}Connection: close\r\n\r\n",
                 compressed.len()
             );
             let _ = stream.write_all(response.as_bytes());
@@ -444,7 +459,7 @@ fn handle_connection(
             }
         } else {
             let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {len}\r\n{cors_no_vary}{sec}Cache-Control: no-store\r\n{vary}Connection: close\r\n\r\n",
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {len}\r\n{extra_headers}{cors_no_vary}{sec}Cache-Control: no-store\r\n{vary}Connection: close\r\n\r\n",
                 len = body_bytes.len()
             );
             let _ = stream.write_all(response.as_bytes());
@@ -756,10 +771,17 @@ fn render_server_block(
     html
 }
 
+/// Headers that the server manages — functions cannot override them.
+const FN_BLOCKED_RESPONSE_HEADERS: &[&str] = &[
+    "content-type", "content-length", "content-encoding",
+    "connection", "transfer-encoding", "keep-alive",
+];
+
 /// Handles an /api/* request by executing the matching JS function.
-fn handle_function(method: &str, path: &str, body: &str, headers: HashMap<String, String>, config: &Config, functions_dir: &str) -> (&'static str, String, String) {
+/// Returns (status, body, content_type, extra_headers).
+fn handle_function(method: &str, path: &str, body: &str, headers: HashMap<String, String>, config: &Config, functions_dir: &str) -> (&'static str, String, String, String) {
     let Some(file_path) = functions::resolve_function(path, functions_dir) else {
-        return ("404 Not Found", "function not found".into(), "text/plain".into());
+        return ("404 Not Found", "function not found".into(), "text/plain".into(), String::new());
     };
 
     // Split path and query string
@@ -798,7 +820,21 @@ fn handle_function(method: &str, path: &str, body: &str, headers: HashMap<String
                 .get("content-type")
                 .cloned()
                 .unwrap_or_else(|| "application/json".into());
-            (status, resp.body, ct)
+
+            // Forward custom headers (excluding server-managed ones)
+            let mut extra = String::new();
+            for (name, value) in &resp.headers {
+                let lower = name.to_lowercase();
+                if FN_BLOCKED_RESPONSE_HEADERS.contains(&lower.as_str()) {
+                    continue;
+                }
+                extra.push_str(&sanitize_header_value(name));
+                extra.push_str(": ");
+                extra.push_str(&sanitize_header_value(value));
+                extra.push_str("\r\n");
+            }
+
+            (status, resp.body, ct, extra)
         }
         Err(e) => {
             eprintln!("function error: {e}");
@@ -806,6 +842,7 @@ fn handle_function(method: &str, path: &str, body: &str, headers: HashMap<String
                 "500 Internal Server Error",
                 "{\"error\":\"internal server error\"}".into(),
                 "application/json".into(),
+                String::new(),
             )
         }
     }
@@ -1104,17 +1141,17 @@ fn sanitize_header_value(value: &str) -> String {
     value.chars().filter(|c| *c != '\r' && *c != '\n' && *c != '\0').collect()
 }
 
-/// Builds CORS response headers based on the api_cors config and the request Origin.
-/// Returns an empty string if api_cors is not configured (no CORS = same-origin only).
-fn cors_headers(config: &Config, request_origin: Option<&str>) -> String {
-    if config.api_cors.is_empty() {
+/// Builds CORS response headers based on a CORS policy string and the request Origin.
+/// Returns an empty string if the policy is empty (no CORS = same-origin only).
+fn cors_headers(api_cors: &str, request_origin: Option<&str>) -> String {
+    if api_cors.is_empty() {
         return String::new();
     }
 
-    let allowed_origin = if config.api_cors == "*" {
+    let allowed_origin = if api_cors == "*" {
         "*".to_string()
     } else if let Some(origin) = request_origin {
-        let allowed: Vec<&str> = config.api_cors.split(',').map(|s| s.trim()).collect();
+        let allowed: Vec<&str> = api_cors.split(',').map(|s| s.trim()).collect();
         if allowed.iter().any(|a| a.eq_ignore_ascii_case(origin)) {
             origin.to_string()
         } else {
@@ -1454,15 +1491,12 @@ mod tests {
 
     #[test]
     fn cors_empty_when_not_configured() {
-        let config = Config::default();
-        assert_eq!(cors_headers(&config, Some("https://evil.com")), "");
+        assert_eq!(cors_headers("", Some("https://evil.com")), "");
     }
 
     #[test]
     fn cors_wildcard() {
-        let mut config = Config::default();
-        config.api_cors = "*".to_string();
-        let h = cors_headers(&config, Some("https://example.com"));
+        let h = cors_headers("*", Some("https://example.com"));
         assert!(h.contains("Access-Control-Allow-Origin: *"));
         assert!(h.contains("Access-Control-Allow-Methods:"));
         assert!(h.contains("Access-Control-Max-Age: 86400"));
@@ -1471,34 +1505,26 @@ mod tests {
 
     #[test]
     fn cors_specific_origin_match() {
-        let mut config = Config::default();
-        config.api_cors = "https://example.com".to_string();
-        let h = cors_headers(&config, Some("https://example.com"));
+        let h = cors_headers("https://example.com", Some("https://example.com"));
         assert!(h.contains("Access-Control-Allow-Origin: https://example.com"));
         assert!(h.contains("Vary: Origin"));
     }
 
     #[test]
     fn cors_specific_origin_no_match() {
-        let mut config = Config::default();
-        config.api_cors = "https://example.com".to_string();
-        let h = cors_headers(&config, Some("https://evil.com"));
+        let h = cors_headers("https://example.com", Some("https://evil.com"));
         assert_eq!(h, "");
     }
 
     #[test]
     fn cors_multiple_origins() {
-        let mut config = Config::default();
-        config.api_cors = "https://a.com, https://b.com".to_string();
-        let h = cors_headers(&config, Some("https://b.com"));
+        let h = cors_headers("https://a.com, https://b.com", Some("https://b.com"));
         assert!(h.contains("Access-Control-Allow-Origin: https://b.com"));
     }
 
     #[test]
     fn cors_no_origin_header() {
-        let mut config = Config::default();
-        config.api_cors = "https://example.com".to_string();
-        let h = cors_headers(&config, None);
+        let h = cors_headers("https://example.com", None);
         assert_eq!(h, "");
     }
 

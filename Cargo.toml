@@ -2,6 +2,11 @@
 name = "vanilo"
 version = "0.1.0"
 edition = "2024"
+description = "Static site generator with edge functions. One binary, zero runtime dependencies."
+license = "MIT"
+repository = "https://github.com/LuluHow/vanilo"
+keywords = ["static-site-generator", "edge-functions", "web-framework"]
+categories = ["web-programming", "command-line-utilities"]
 
 [dependencies]
 brotli = "7"

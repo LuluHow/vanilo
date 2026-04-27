@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use serde::Deserialize;
 
@@ -25,6 +26,8 @@ pub struct Config {
     pub cross_origin_resource_policy: String,
     // CORS for /api/* endpoints
     pub api_cors: String,
+    // Per-function overrides (keys are function names, e.g. "i" for /api/i)
+    pub functions: HashMap<String, FunctionConfig>,
     // proxy
     pub trusted_proxy: Option<String>,
     // build
@@ -35,6 +38,15 @@ pub struct Config {
     pub webhook_secret: Option<String>,
     pub webhook_rate_limit: usize,
     pub webhook_rate_window: u64,
+}
+
+/// Per-function overrides for CORS and rate limiting.
+/// Fields are optional — `None` means "use the global config".
+#[derive(Clone, Default)]
+pub struct FunctionConfig {
+    pub cors: Option<String>,
+    pub rate_limit: Option<usize>,
+    pub rate_window: Option<u64>,
 }
 
 impl Default for Config {
@@ -57,6 +69,7 @@ impl Default for Config {
             cross_origin_opener_policy: "same-origin".into(),
             cross_origin_resource_policy: "same-origin".into(),
             api_cors: String::new(),
+            functions: HashMap::new(),
             trusted_proxy: None,
             minify_js: false,
             build_dir: None,
@@ -99,6 +112,34 @@ impl Config {
         h.push_str("X-Content-Type-Options: nosniff\r\n");
         h
     }
+
+    /// Returns the effective CORS config for a function (per-function or global).
+    pub fn fn_cors(&self, fn_name: &str) -> &str {
+        self.functions.get(fn_name)
+            .and_then(|fc| fc.cors.as_deref())
+            .unwrap_or(&self.api_cors)
+    }
+
+    /// Returns the effective rate limit for a function (per-function or global).
+    pub fn fn_rate_limit(&self, fn_name: &str) -> usize {
+        self.functions.get(fn_name)
+            .and_then(|fc| fc.rate_limit)
+            .unwrap_or(self.rate_limit)
+    }
+
+    /// Returns the effective rate window for a function (per-function or global).
+    pub fn fn_rate_window(&self, fn_name: &str) -> u64 {
+        self.functions.get(fn_name)
+            .and_then(|fc| fc.rate_window)
+            .unwrap_or(self.rate_window)
+    }
+
+    /// Whether a function has its own rate config (separate bucket from global).
+    pub fn has_fn_rate_config(&self, fn_name: &str) -> bool {
+        self.functions.get(fn_name)
+            .map(|fc| fc.rate_limit.is_some() || fc.rate_window.is_some())
+            .unwrap_or(false)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +176,14 @@ struct RawConfig {
     // Nested tables
     security_headers: Option<SecurityHeaders>,
     webhook: Option<Webhook>,
+    functions: Option<HashMap<String, RawFunctionConfig>>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawFunctionConfig {
+    cors: Option<String>,
+    rate_limit: Option<usize>,
+    rate_window: Option<u64>,
 }
 
 #[derive(Deserialize, Default)]
@@ -255,6 +304,17 @@ fn load_from_str(content: &str) -> Result<Config, String> {
         }
         if let Some(v) = wh.webhook_rate_limit { config.webhook_rate_limit = v; }
         if let Some(v) = wh.webhook_rate_window { config.webhook_rate_window = v; }
+    }
+
+    // Per-function overrides: [functions.name]
+    if let Some(fns) = raw.functions {
+        for (name, raw_fn) in fns {
+            config.functions.insert(name, FunctionConfig {
+                cors: raw_fn.cors,
+                rate_limit: raw_fn.rate_limit,
+                rate_window: raw_fn.rate_window,
+            });
+        }
     }
 
     Ok(config)
@@ -430,5 +490,86 @@ port = 3000
             cfg.content_security_policy,
             "default-src 'self'; script-src 'self' #hash"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-function config
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn config_per_function_cors() {
+        let input = r#"
+api_cors = ""
+
+[functions.i]
+cors = "*"
+"#;
+        let cfg = load_from_str(input).unwrap();
+        assert_eq!(cfg.fn_cors("i"), "*");
+        // Unlisted function falls back to global
+        assert_eq!(cfg.fn_cors("posts"), "");
+    }
+
+    #[test]
+    fn config_per_function_rate_limit() {
+        let input = r#"
+rate_limit = 60
+rate_window = 60
+
+[functions.i]
+rate_limit = 120
+rate_window = 300
+"#;
+        let cfg = load_from_str(input).unwrap();
+        assert_eq!(cfg.fn_rate_limit("i"), 120);
+        assert_eq!(cfg.fn_rate_window("i"), 300);
+        assert!(cfg.has_fn_rate_config("i"));
+        // Unlisted function falls back to global
+        assert_eq!(cfg.fn_rate_limit("posts"), 60);
+        assert_eq!(cfg.fn_rate_window("posts"), 60);
+        assert!(!cfg.has_fn_rate_config("posts"));
+    }
+
+    #[test]
+    fn config_per_function_partial_override() {
+        let input = r#"
+rate_limit = 60
+rate_window = 60
+api_cors = "https://a.com"
+
+[functions.i]
+cors = "*"
+"#;
+        let cfg = load_from_str(input).unwrap();
+        // cors overridden, rate falls back to global
+        assert_eq!(cfg.fn_cors("i"), "*");
+        assert_eq!(cfg.fn_rate_limit("i"), 60);
+        assert!(!cfg.has_fn_rate_config("i"));
+    }
+
+    #[test]
+    fn config_multiple_functions() {
+        let input = r#"
+[functions.i]
+cors = "*"
+rate_limit = 200
+
+[functions.webhook]
+rate_limit = 5
+rate_window = 120
+"#;
+        let cfg = load_from_str(input).unwrap();
+        assert_eq!(cfg.fn_cors("i"), "*");
+        assert_eq!(cfg.fn_rate_limit("i"), 200);
+        assert_eq!(cfg.fn_rate_limit("webhook"), 5);
+        assert_eq!(cfg.fn_rate_window("webhook"), 120);
+    }
+
+    #[test]
+    fn config_no_functions_section() {
+        let cfg = load_from_str("port = 3000\n").unwrap();
+        assert!(cfg.functions.is_empty());
+        assert_eq!(cfg.fn_cors("anything"), "");
+        assert_eq!(cfg.fn_rate_limit("anything"), 60);
     }
 }

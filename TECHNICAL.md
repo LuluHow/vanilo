@@ -115,19 +115,31 @@ The `build_lock` (`Arc<Mutex<()>>`) is created in `main()` and shared between th
 
 ### 3.2 config.rs
 
-**`Config` struct** — 26 fields covering:
+**`Config` struct** — 27 fields covering:
 - Network: `port`, `host`
 - Server limits: `max_body`, `max_connections`, `rate_limit`, `rate_window`
 - JS runtime: `timeout`, `memory`, `fetch_timeout`
 - Security headers: CSP, HSTS, X-Frame-Options, Referrer-Policy, Permissions-Policy, COOP, CORP
 - CORS: `api_cors`
+- Per-function overrides: `functions` (`HashMap<String, FunctionConfig>`)
 - Proxy: `trusted_proxy`
 - Build: `minify_js`
 - Webhook: `webhook_path`, `webhook_secret`, `webhook_rate_limit`, `webhook_rate_window`
 
+**`FunctionConfig` struct** — per-function overrides (all optional, `None` = use global):
+- `cors`: CORS policy override
+- `rate_limit`: rate limit override
+- `rate_window`: rate window override
+
 **Configuration priority**: CLI args > env vars (`PORT`, `HOST`) > `vanilo.toml` > defaults.
 
-**TOML parsing**: uses the `toml` crate with serde deserialization. A `RawConfig` struct with `#[derive(Deserialize)]` handles both flat keys and nested tables (`[security_headers]`, `[webhook]`). Full TOML is supported: nested tables, arrays, multiline strings, inline comments. When both a flat key and a nested table key exist for the same field, the nested table takes precedence.
+**TOML parsing**: uses the `toml` crate with serde deserialization. A `RawConfig` struct with `#[derive(Deserialize)]` handles both flat keys and nested tables (`[security_headers]`, `[webhook]`, `[functions.*]`). Full TOML is supported: nested tables, arrays, multiline strings, inline comments. When both a flat key and a nested table key exist for the same field, the nested table takes precedence.
+
+**Per-function config helpers**:
+- `fn_cors(fn_name)`: returns per-function CORS or falls back to `api_cors`
+- `fn_rate_limit(fn_name)`: returns per-function rate limit or falls back to `rate_limit`
+- `fn_rate_window(fn_name)`: returns per-function rate window or falls back to `rate_window`
+- `has_fn_rate_config(fn_name)`: whether the function has its own rate bucket
 
 **Defaults**:
 ```
@@ -433,7 +445,7 @@ Build-time security analysis.
 
 **SQL subtlety**: `find_params_separator()` parses quoted strings so it only checks for concatenation in the first SQL argument, not in the parameters array. `db.query("SELECT ?", ["%" + q + "%"])` is **safe**.
 
-### 3.10 server.rs (1707 lines)
+### 3.10 server.rs (1738 lines)
 
 Minimal multi-threaded HTTP server.
 
@@ -478,7 +490,7 @@ Minimal multi-threaded HTTP server.
 
 #### CORS
 
-Configured via `api_cors` in `vanilo.toml`:
+Configured via `api_cors` in `vanilo.toml` (global) or `[functions.<name>]` (per-function):
 - Empty (default): no CORS headers = same-origin only
 - `"*"`: `Access-Control-Allow-Origin: *` (no `Vary: Origin`)
 - Specific: `"https://example.com"` or multiple `"https://a.com, https://b.com"`
@@ -487,13 +499,15 @@ Configured via `api_cors` in `vanilo.toml`:
 - Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
 - Allowed headers: Content-Type, Authorization, X-Requested-With
 - `Access-Control-Max-Age: 86400` (24h)
+- Per-function override: `[functions.i] cors = "*"` overrides the global `api_cors` for `/api/i`
 
 #### Rate limiting
 
 - Per-IP on `/api/*`
 - Sliding window: `rate_limit` requests per `rate_window` seconds
+- Per-function override: `[functions.i] rate_limit = 30` creates a separate rate bucket for `/api/i` (keyed by `ip:fn_name`). Functions without overrides share the global bucket (keyed by `ip`)
 - Behind a reverse proxy: if `trusted_proxy` matches the peer IP, uses `X-Forwarded-For` (first IP = client)
-- Automatic pruning of stale entries when the map exceeds 100 entries
+- Automatic pruning of stale entries when the map exceeds 100 entries (uses max window across all configs)
 - Separate rate limit for webhook (default 5/min)
 
 #### Compression
@@ -594,6 +608,14 @@ fetch_timeout = 10      # seconds (outbound HTTP)
 # api_cors = ""                  # Empty = same-origin (default)
 # api_cors = "*"                 # Allow all
 # api_cors = "https://a.com, https://b.com"   # Specific
+
+# Per-function overrides: [functions.<name>] for /api/<name>
+# Overrides CORS and/or rate limiting for a specific function.
+# Omitted fields fall back to the global config.
+# [functions.i]
+# cors = "*"                     # Override CORS for /api/i
+# rate_limit = 30                # Own rate bucket: 30 req/60s
+# rate_window = 60
 
 [security_headers]
 content_security_policy = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
@@ -811,7 +833,8 @@ function handler(req) {
     return {
         status: 200,              // optional (default: 200)
         headers: {                // optional
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "location": "/other"  // custom headers are forwarded
         },
         body: "response"          // string or object (auto JSON.stringify)
     };
@@ -1059,6 +1082,7 @@ Every response includes:
 - `Cache-Control` (adapted to file type)
 - `Content-Encoding` + `Vary: Accept-Encoding` (if compressed)
 - CORS headers (if configured, for `/api/*` only)
+- Custom headers from edge functions (e.g. `Location` for redirects). Server-managed headers (`Content-Type`, `Content-Length`, `Content-Encoding`, `Connection`, `Transfer-Encoding`, `Keep-Alive`) cannot be overridden by functions.
 
 ### Cache-Control
 
@@ -1086,7 +1110,7 @@ Never served or copied to dist: `.db`, `.sqlite`, `.sqlite3`, `.env`, `.env.*`, 
 | **Build (escaping)** | `{{prop}}` and `{{@content}}` are HTML-escaped by default |
 | **Server (path)** | Blocks `..`, `\0`, symlinks outside dist/, sensitive extensions |
 | **Server (headers)** | CSP, HSTS, X-Frame-Options, COOP, CORP, nosniff, Referrer-Policy, Permissions-Policy |
-| **Server (rate limit)** | Per-IP on /api/*, dedicated for webhook |
+| **Server (rate limit)** | Per-IP on /api/* (global or per-function buckets), dedicated for webhook |
 | **Server (body)** | Configurable max size, Content-Type enforced for body-bearing methods |
 | **Server (CORS)** | Opt-in, Origin verification, preflight handling |
 | **Runtime (JS)** | Sandboxed QuickJS: memory, timeout, stack |
@@ -1238,7 +1262,7 @@ The project contains exhaustive unit tests in every module:
 
 | Module | Tests | Coverage |
 |--------|-------|----------|
-| `config.rs` | 19 tests | TOML parsing (flat, nested, merge, multiline), security headers, CORS |
+| `config.rs` | 24 tests | TOML parsing (flat, nested, merge, multiline), security headers, CORS, per-function config |
 | `parser.rs` | 4 tests | Self-closing, block, nesting, mixed HTML |
 | `component.rs` | 10 tests | Props, escaping, raw, children, layout |
 | `builder.rs` | 32 tests | Meta extraction, hashing, compression, CSS inline, JS minification, templates, server blocks, HTML minification |
@@ -1250,7 +1274,7 @@ The project contains exhaustive unit tests in every module:
 | `typescript.rs` | 10 tests | Type stripping, interfaces, enums, generics, casts, error handling |
 | `watcher.rs` | 4 tests | Debounce coalescing, separate batches, lock skip, watched dirs |
 
-**Total: ~310 unit tests.**
+**Total: 317 unit tests.**
 
 Run tests:
 ```bash
