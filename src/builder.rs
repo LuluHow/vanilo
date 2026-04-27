@@ -271,6 +271,17 @@ pub fn build() -> Result<(), String> {
         println!("hashed {} asset(s)", renames.len());
     }
 
+    // Copy edge functions into dist so dist/ is fully standalone
+    let functions_path = Path::new(FUNCTIONS_DIR);
+    if functions_path.exists() {
+        let fn_dest = dist_tmp.join(FUNCTIONS_DIR);
+        fs::create_dir_all(&fn_dest).map_err(|e| format!("create {}: {e}", fn_dest.display()))?;
+        let fn_count = copy_dir_recursive(functions_path, &fn_dest)?;
+        if fn_count > 0 {
+            println!("bundled {fn_count} edge function(s)");
+        }
+    }
+
     // Pre-compress with gzip + brotli
     let compressed = precompress_dir(dist_tmp)?;
     if compressed > 0 {

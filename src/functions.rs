@@ -10,6 +10,7 @@ use rquickjs::function::Opt;
 
 use crate::config::Config;
 
+#[cfg(test)]
 const FUNCTIONS_DIR: &str = "functions";
 const DB_FILE: &str = "data.db";
 const MAX_FETCH_RESPONSE: usize = 10 * 1024 * 1024; // 10 MB
@@ -34,7 +35,8 @@ pub struct FnResponse {
 
 /// Resolves /api/hello -> functions/hello.js or functions/hello.ts
 /// Priority: .js > .ts (explicit JS overrides TS)
-pub fn resolve_function(api_path: &str) -> Option<String> {
+/// `functions_dir` controls where to look (e.g. "functions" or "dist/functions").
+pub fn resolve_function(api_path: &str, functions_dir: &str) -> Option<String> {
     let path = api_path.split('?').next().unwrap_or(api_path);
     let clean = path.strip_prefix("/api/").unwrap_or(path).trim_end_matches('/');
 
@@ -42,19 +44,19 @@ pub fn resolve_function(api_path: &str) -> Option<String> {
         return None;
     }
 
-    let js_path = format!("{FUNCTIONS_DIR}/{clean}.js");
+    let js_path = format!("{functions_dir}/{clean}.js");
     if Path::new(&js_path).is_file() {
         return Some(js_path);
     }
-    let ts_path = format!("{FUNCTIONS_DIR}/{clean}.ts");
+    let ts_path = format!("{functions_dir}/{clean}.ts");
     if Path::new(&ts_path).is_file() {
         return Some(ts_path);
     }
-    let js_index = format!("{FUNCTIONS_DIR}/{clean}/index.js");
+    let js_index = format!("{functions_dir}/{clean}/index.js");
     if Path::new(&js_index).is_file() {
         return Some(js_index);
     }
-    let ts_index = format!("{FUNCTIONS_DIR}/{clean}/index.ts");
+    let ts_index = format!("{functions_dir}/{clean}/index.ts");
     if Path::new(&ts_index).is_file() {
         return Some(ts_index);
     }
@@ -1138,12 +1140,12 @@ mod tests {
     #[test]
     fn resolve_strips_api_prefix() {
         // This test checks the path logic, actual file lookup requires filesystem
-        assert_eq!(resolve_function("/api/"), None); // empty after strip
+        assert_eq!(resolve_function("/api/", FUNCTIONS_DIR), None); // empty after strip
     }
 
     #[test]
     fn resolve_blocks_traversal() {
-        assert_eq!(resolve_function("/api/../etc/passwd"), None);
+        assert_eq!(resolve_function("/api/../etc/passwd", FUNCTIONS_DIR), None);
     }
 
     #[test]
@@ -1154,7 +1156,7 @@ mod tests {
         let ts_file = format!("{dir}/hello.ts");
         std::fs::write(&ts_file, "function handler(req: any) { return { status: 200 }; }").unwrap();
 
-        let result = resolve_function("/api/__test_ts/hello");
+        let result = resolve_function("/api/__test_ts/hello", FUNCTIONS_DIR);
         assert_eq!(result, Some(ts_file.clone()));
 
         // Cleanup
@@ -1172,7 +1174,7 @@ mod tests {
         std::fs::write(&js_file, "function handler(req) { return { status: 200 }; }").unwrap();
         std::fs::write(&ts_file, "function handler(req: any) { return { status: 200 }; }").unwrap();
 
-        let result = resolve_function("/api/__test_priority/dual");
+        let result = resolve_function("/api/__test_priority/dual", FUNCTIONS_DIR);
         assert_eq!(result, Some(js_file.clone()));
 
         // Cleanup

@@ -109,11 +109,14 @@ impl Drop for ConnectionGuard {
     }
 }
 
-pub fn serve(config: Config, build_lock: Arc<Mutex<()>>) -> Result<(), String> {
+pub fn serve(config: Config, build_lock: Arc<Mutex<()>>, prod: bool) -> Result<(), String> {
     let addr = format!("{}:{}", config.host, config.port);
     let listener = TcpListener::bind(&addr).map_err(|e| format!("bind {addr}: {e}"))?;
     println!("serving on http://{addr}");
 
+    let functions_dir: Arc<String> = Arc::new(
+        if prod { "dist/functions".to_string() } else { "functions".to_string() }
+    );
     let config = Arc::new(config);
     let rate_map: Arc<Mutex<HashMap<String, (usize, Instant)>>> =
         Arc::new(Mutex::new(HashMap::new()));
@@ -150,12 +153,13 @@ pub fn serve(config: Config, build_lock: Arc<Mutex<()>>) -> Result<(), String> {
         let wh_lock = build_lock.clone();
         let comps = components.clone();
         let scache = server_cache.clone();
+        let fn_dir = functions_dir.clone();
         active.fetch_add(1, Ordering::Relaxed);
         let guard = ConnectionGuard(active.clone());
 
         thread::spawn(move || {
             let _guard = guard;
-            handle_connection(&mut stream, &rate, &cfg, &wh_rate, &wh_lock, &comps, &scache);
+            handle_connection(&mut stream, &rate, &cfg, &wh_rate, &wh_lock, &comps, &scache, &fn_dir);
         });
     }
 
@@ -170,6 +174,7 @@ fn handle_connection(
     build_lock: &Arc<Mutex<()>>,
     components: &HashMap<String, Component>,
     server_cache: &Mutex<ServerCache>,
+    functions_dir: &str,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
@@ -391,7 +396,7 @@ fn handle_connection(
         // HEAD → execute as GET, suppress body in response
         let effective_method = if method == "HEAD" { "GET" } else { method };
         let req_headers = parse_request_headers(&headers_str);
-        let (status, body, content_type) = handle_function(effective_method, raw_path, &req_body, req_headers, config);
+        let (status, body, content_type) = handle_function(effective_method, raw_path, &req_body, req_headers, config, functions_dir);
         let content_type = sanitize_header_value(&content_type);
         let body_bytes = body.as_bytes();
 
@@ -469,7 +474,7 @@ fn handle_connection(
             // Dynamic page: process server blocks, compress on-the-fly
             let raw_bytes = raw_body.unwrap();
             let html_str = String::from_utf8_lossy(&raw_bytes);
-            let assembled = process_server_blocks(&html_str, components, server_cache, config);
+            let assembled = process_server_blocks(&html_str, components, server_cache, config, functions_dir);
             let assembled_bytes = assembled.as_bytes();
 
             let etag = compute_etag(assembled_bytes);
@@ -556,6 +561,7 @@ fn process_server_blocks(
     components: &HashMap<String, Component>,
     cache: &Mutex<ServerCache>,
     config: &Config,
+    functions_dir: &str,
 ) -> String {
     let mut result = String::with_capacity(html.len());
     let mut remaining = html;
@@ -578,7 +584,7 @@ fn process_server_blocks(
 
         let rendered = match parse_server_marker(marker) {
             Some((fn_name, comp_name, ttl, params)) => {
-                render_server_block(&fn_name, &comp_name, ttl, &params, components, cache, config)
+                render_server_block(&fn_name, &comp_name, ttl, &params, components, cache, config, functions_dir)
             }
             None => {
                 eprintln!("server block: malformed marker: {marker}");
@@ -647,6 +653,7 @@ fn render_server_block(
     components: &HashMap<String, Component>,
     cache: &Mutex<ServerCache>,
     config: &Config,
+    functions_dir: &str,
 ) -> String {
     let cache_key = format!("{fn_name}:{comp_name}:{params}");
     let start = Instant::now();
@@ -662,7 +669,7 @@ fn render_server_block(
 
     // Resolve and execute the edge function
     let api_path = format!("/api/{fn_name}");
-    let file_path = match functions::resolve_function(&api_path) {
+    let file_path = match functions::resolve_function(&api_path, functions_dir) {
         Some(p) => p,
         None => {
             eprintln!("server block: function not found: {fn_name}");
@@ -750,8 +757,8 @@ fn render_server_block(
 }
 
 /// Handles an /api/* request by executing the matching JS function.
-fn handle_function(method: &str, path: &str, body: &str, headers: HashMap<String, String>, config: &Config) -> (&'static str, String, String) {
-    let Some(file_path) = functions::resolve_function(path) else {
+fn handle_function(method: &str, path: &str, body: &str, headers: HashMap<String, String>, config: &Config, functions_dir: &str) -> (&'static str, String, String) {
+    let Some(file_path) = functions::resolve_function(path, functions_dir) else {
         return ("404 Not Found", "function not found".into(), "text/plain".into());
     };
 

@@ -115,7 +115,7 @@ fn main() {
                 });
             }
 
-            if let Err(e) = server::serve(cfg, build_lock) {
+            if let Err(e) = server::serve(cfg, build_lock, prod) {
                 eprintln!("error: {e}");
                 process::exit(1);
             }
