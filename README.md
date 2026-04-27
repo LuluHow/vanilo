@@ -6,10 +6,17 @@ Write HTML, run `vanilo build`, done. Need server-side logic? Drop a JS file in 
 
 **Status:** pre-1.0. API may change. Not yet tested at scale.
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/LuluHow/vanilo/main/install.sh | sh
+```
+
+Detects your OS and architecture, downloads the right binary. Falls back to `cargo install` if no pre-built binary exists. On Windows, download `vanilo-windows-x86_64.exe` from [the latest release](https://github.com/LuluHow/vanilo/releases/tag/latest).
+
 ## Quick start
 
 ```bash
-cargo install --git https://github.com/LuluHow/vanilo.git
 vanilo init
 vanilo serve
 ```

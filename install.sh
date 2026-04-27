@@ -2,7 +2,7 @@
 set -e
 
 # vanilo installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/user/vanilo/main/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/LuluHow/vanilo/main/install.sh | sh
 
 REPO="https://github.com/LuluHow/vanilo"
 BIN_NAME="vanilo"
@@ -10,7 +10,6 @@ INSTALL_DIR="${VANILO_INSTALL_DIR:-/usr/local/bin}"
 
 main() {
     need_cmd curl
-    need_cmd tar
 
     os="$(uname -s)"
     arch="$(uname -m)"
@@ -23,23 +22,23 @@ main() {
 
     case "$arch" in
         x86_64|amd64)  target_arch="x86_64" ;;
-        arm64|aarch64) target_arch="aarch64" ;;
+        arm64|aarch64) target_arch="arm64" ;;
         *)             err "unsupported architecture: $arch" ;;
     esac
 
-    target="${target_os}-${target_arch}"
+    artifact="${BIN_NAME}-${target_os}-${target_arch}"
+    url="${REPO}/releases/download/latest/${artifact}"
 
-    # Try pre-built binary first
-    url="${REPO}/releases/latest/download/${BIN_NAME}-${target}.tar.gz"
     if curl --output /dev/null --silent --head --fail "$url"; then
-        echo "downloading ${BIN_NAME} (${target})..."
+        echo "downloading ${BIN_NAME} (${target_os}-${target_arch})..."
         tmp="$(mktemp -d)"
-        curl -fsSL "$url" | tar xz -C "$tmp"
+        curl -fsSL "$url" -o "$tmp/$BIN_NAME"
+        chmod +x "$tmp/$BIN_NAME"
         install_bin "$tmp/$BIN_NAME"
         rm -rf "$tmp"
     else
         # Fallback: build from source
-        echo "no pre-built binary for ${target}, building from source..."
+        echo "no pre-built binary for ${target_os}-${target_arch}, building from source..."
         need_cmd cargo
         cargo install --git "$REPO" --locked
         echo "installed via cargo to ~/.cargo/bin/${BIN_NAME}"

@@ -13,6 +13,7 @@ mod watcher;
 use std::env;
 use std::process;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 fn uninstall() {
     use std::fs;
@@ -63,8 +64,76 @@ fn uninstall() {
     println!("vanilo uninstalled");
 }
 
+fn check_update() {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let local = env!("VANILO_COMMIT");
+    if local == "unknown" {
+        return;
+    }
+
+    let home = match env::var("HOME").or_else(|_| env::var("USERPROFILE")) {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+
+    let cache_dir = PathBuf::from(&home).join(".vanilo");
+    let cache_file = cache_dir.join("last_check");
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    // Read cache: "timestamp remote_commit"
+    if let Ok(contents) = fs::read_to_string(&cache_file) {
+        let parts: Vec<&str> = contents.trim().split_whitespace().collect();
+        if let Some(ts) = parts.first().and_then(|s| s.parse::<u64>().ok()) {
+            if now - ts < 86400 {
+                if let Some(remote) = parts.get(1) {
+                    if *remote != local {
+                        eprintln!("vanilo: update available — curl -fsSL https://raw.githubusercontent.com/LuluHow/vanilo/main/install.sh | sh");
+                    }
+                }
+                return;
+            }
+        }
+    }
+
+    // Fetch remote commit (2s timeout, silent failure)
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(2)))
+        .build()
+        .new_agent();
+
+    let remote = match agent
+        .get("https://github.com/LuluHow/vanilo/releases/download/latest/COMMIT")
+        .call()
+    {
+        Ok(resp) => match resp.into_body().read_to_string() {
+            Ok(s) => s.trim().to_string(),
+            Err(_) => return,
+        },
+        Err(_) => return,
+    };
+
+    if remote.is_empty() {
+        return;
+    }
+
+    let _ = fs::create_dir_all(&cache_dir);
+    let _ = fs::write(&cache_file, format!("{now} {remote}"));
+
+    if remote != local {
+        eprintln!("vanilo: update available — curl -fsSL https://raw.githubusercontent.com/LuluHow/vanilo/main/install.sh | sh");
+    }
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
+
+    check_update();
 
     match args.get(1).map(|s| s.as_str()) {
         Some("build") => {
