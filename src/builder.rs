@@ -271,7 +271,13 @@ pub fn build() -> Result<(), String> {
         println!("hashed {} asset(s)", renames.len());
     }
 
-    // Copy edge functions into dist so dist/ is fully standalone
+    // Pre-compress with gzip + brotli
+    let compressed = precompress_dir(dist_tmp)?;
+    if compressed > 0 {
+        println!("pre-compressed {compressed} file(s)");
+    }
+
+    // Copy edge functions into dist AFTER pre-compression so they stay raw
     let functions_path = Path::new(FUNCTIONS_DIR);
     if functions_path.exists() {
         let fn_dest = dist_tmp.join(FUNCTIONS_DIR);
@@ -280,12 +286,6 @@ pub fn build() -> Result<(), String> {
         if fn_count > 0 {
             println!("bundled {fn_count} edge function(s)");
         }
-    }
-
-    // Pre-compress with gzip + brotli
-    let compressed = precompress_dir(dist_tmp)?;
-    if compressed > 0 {
-        println!("pre-compressed {compressed} file(s)");
     }
 
     // Swap: remove dist, rename dist_tmp -> dist
